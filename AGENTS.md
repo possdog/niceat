@@ -45,7 +45,8 @@ a host runs several services and ports are handed out dynamically, e.g.
 
 `porkbun_api_key.txt` / `porkbun_secret_key.txt` in the working directory
 hold the sandbox Porkbun credentials (gitignored; never commit, never
-hard-code them into source or logs).
+hard-code them into source or logs).  The claims store lives in
+`claims.bolt` in the same directory, also gitignored.
 
 The DNS backend is currently `stubProvisioner`: it logs what it would create
 and returns success, so requests "work" end-to-end but no DNS record exists.
@@ -68,10 +69,14 @@ manage.  A reverse proxy in front must therefore forward the original Host
 (or rewrite it to the correct domain); do not honor client-supplied
 `X-Forwarded-Host`.
 
-Status codes: 201 created; 400 invalid handle/DID or malformed JSON; 405
-non-POST (from the mux's `POST /register` pattern); 413 body over 4 KiB;
-415 Content-Type not `application/json`; 421 Host not a managed domain;
-500 provisioning failure.
+Status codes: 201 created; 200 idempotent repeat (handle already bound to
+this DID); 400 invalid handle/DID or malformed JSON; 405 non-POST (from the
+mux's `POST /register` pattern); 409 handle claimed by a different DID
+(worded identically to the reserved-name refusal, so probers learn nothing);
+413 body over 4 KiB; 415 Content-Type not `application/json`; 421 Host not a
+managed domain; 429 per-IP rate limit exceeded; 500 provisioning or
+claims-store failure (generic detail; backend errors are logged, not
+leaked).
 
 Validation (in `validate.go`, all error messages user-displayable).  A
 requested handle must be a valid Bluesky username **and** a valid DNS
@@ -82,9 +87,12 @@ spec (atproto.com/specs/handle), the reference implementation
 
 - **Label** (`normalizeHandle`): trimmed and lowercased; 3-63 chars
   `[a-z0-9-]`, no leading/trailing hyphen, no dots (explicitly, so a caller
-  cannot reach outside the served domain), no underscores.  Min 3 is
-  Bluesky's "Handle Too Short" rule; 63 and the character class are the
-  shared DNS-label / AT Proto segment rules; punycode `xn--` labels are
+  cannot reach outside the served domain), no underscores.  The 3-char
+  minimum is a niceat policy, not an upstream rule: Bluesky enforces no
+  minimum for custom domains (short handles like `s.wagg.ing` work), but
+  short labels are scarce and perceived as valuable, so squatting them is
+  discouraged.  63 and the character class are the shared DNS-label /
+  AT Proto segment rules; punycode `xn--` labels are
   valid per the spec.  Labels in `reservedLabels` (app.go) are refused:
   infrastructure names (www, mx, ns1, ...) and AT Protocol names
   (_atproto, bsky, plc, ...).  The list is meant to be over-inclusive;
@@ -115,9 +123,16 @@ cmd/niceat/
 ├── app.go         — app struct (managed-domain set), regexes, reservedLabels, JSON types
 ├── handlers.go    — resolveDomain, handleRegister + writeJSON
 ├── validate.go    — parseDomain, normalizeHandle, validateDID
+├── store.go       — bbolt-backed claims store (tryClaim, release)
+├── ratelimit.go   — per-IP token bucket middleware
 ├── provision.go   — provisioner interface, stubProvisioner, Porkbun notes
 └── *_test.go      — tests alongside source, fakeProvisioner in helpers_test.go
 ```
+
+Two third-party dependencies exist alongside the standard library, both
+chosen to match nicelink: `go.etcd.io/bbolt` (embedded, single-writer KV
+store — right shape for a small persistent claims map) and
+`golang.org/x/time/rate` (token buckets).
 
 The handler only sees the `provisioner` interface
 (`Provision(ctx, domain, label, did)`), so `porkbun.go` can be added without
@@ -134,21 +149,30 @@ markup must be parameterized by the request Host — "get your handle under
 same-origin so the Host header carries the domain selection.  See the
 TODO(frontend) note in main.go.
 
-## Planned defenses (designed for, deliberately NOT yet implemented)
+## Defenses
 
-Correctness comes first; none of these are wired up yet.  Hook points:
-
-- **Per-IP rate limiting** — middleware slot in `main.go` marked
-  `TODO(defense)`; copy the approach from nicelink's `ratelimit.go`
-  (golang.org/x/time/rate, rightmost X-Forwarded-For behind trusted proxy).
-- **Duplicate/conflicting claims** — nothing persists claims yet, so the same
-  label can be claimed twice and the second overwrites the first.  Needs a
-  store (bbolt) before public exposure.
-- **DID ownership verification** — currently the form attests the DID; a
-  stronger design verifies the requester controls the DID before
-  provisioning.
-
-Do not consider the service deployable until these are addressed.
+- **Claims store** (`store.go`) — bbolt file `claims.bolt` in the working
+  directory (gitignored, created on first run).  `tryClaim` is a
+  put-if-absent inside a single write transaction, so concurrent requests
+  cannot both win a label and an existing handle can never be silently
+  re-bound to a different account.  The claim is taken *before*
+  provisioning: a second request for a taken label is honored only as an
+  idempotent repeat by the same DID (200, and the provisioner runs again so
+  a claim left dangling by a crash is healed), and refused for any other
+  DID (409).  If provisioning fails on a *newly created* claim, the claim
+  is released so the failure does not squat the label.
+- **Per-IP rate limiting** (`ratelimit.go`) — token bucket per client IP
+  (x/time/rate): burst 5, sustained 1 per 10 s; excess requests get 429.
+  Client IP comes from `RemoteAddr` normally; when the direct peer is a
+  trusted proxy (localhost only), the **rightmost** `X-Forwarded-For`
+  entry is used — a client can't mint fresh buckets by spoofing left-side
+  entries.  `X-Real-IP` is never trusted.  Idle IPs are evicted after an
+  hour (sweep above a 10 000-entry threshold) to bound memory under
+  IP-spray abuse.
+- **DID ownership verification** — deliberately NOT yet implemented.  The
+  form currently attests the DID; a stronger design would verify the
+  requester controls the DID before provisioning.  This is the main
+  remaining gap before public exposure (together with the Porkbun client).
 
 ## Testing / linting
 

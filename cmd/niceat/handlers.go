@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"mime"
 	"net"
@@ -18,13 +19,16 @@ import (
 //
 // Status codes:
 //
-//	201 — record provisioned (the handle is live once DNS propagates)
-//	400 — invalid handle or DID, malformed JSON
+//	201 — handle registered
+//	200 — idempotent repeat: the handle is already bound to this DID
+//	400 — invalid handle or DID (including reserved names), malformed JSON
 //	405 — non-POST method (enforced by the mux's method-specific pattern)
+//	409 — handle already claimed by a different DID
 //	413 — request body exceeds maxRequestBody
 //	415 — Content-Type is not application/json
 //	421 — Host header does not match a domain this server manages
-//	500 — DNS provisioning failed
+//	429 — caller exceeded its per-IP rate limit (middleware)
+//	500 — DNS provisioning or claims-store failure
 //
 // Error bodies use the shared {"detail": "..."} shape; detail strings for 4xx
 // are written for display to the end user, while 5xx details stay generic so
@@ -83,17 +87,53 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- 4. Provision the DNS record ---
+	// --- 4. Claim the label (put-if-absent) ---
+	// The claim is acquired *before* provisioning so two concurrent
+	// requests cannot both win the same label, and so an existing handle
+	// can never be silently re-bound to a different account.
+	created, existingDID, err := a.claims.tryClaim(domain, label, did)
+	if err != nil {
+		log.Printf("ERROR: claiming %s.%s failed: %v", label, domain, err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Detail: "Internal server error"})
+		return
+	}
+	if !created && existingDID != did {
+		// Deliberately the same wording as the reserved-name error: a
+		// prober learns only "not available", never whether a handle
+		// is taken by a person or blocked by policy.
+		writeJSON(w, http.StatusConflict, errorResponse{Detail: fmt.Sprintf("handle %q is not available", label)})
+		return
+	}
+
+	// --- 5. Provision the DNS record ---
+	// This also runs on the idempotent same-DID repeat: Porkbun treats an
+	// identical re-create as success, so a claim left dangling by a crash
+	// between claim and provision is healed by its owner re-submitting.
 	if err := a.provisioner.Provision(r.Context(), domain, label, did); err != nil {
-		// Log the error server-side; the client gets a generic message.
+		// A newly created claim must be rolled back so the failure does
+		// not squat the label; a pre-existing claim belongs to its
+		// owner and stays.
+		if created {
+			if rerr := a.claims.release(domain, label); rerr != nil {
+				log.Printf("ERROR: releasing claim on %s.%s after provisioning failure: %v", label, domain, rerr)
+			}
+		}
 		log.Printf("ERROR: provisioning _atproto.%s.%s failed: %v", label, domain, err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Detail: "Internal server error"})
 		return
 	}
 
-	// --- 5. Success ---
-	writeJSON(w, http.StatusCreated, registerResponse{
-		Status: "created",
+	// --- 6. Success ---
+	// 201 for a fresh registration, 200 for an idempotent repeat by the
+	// same DID (the handle was already bound to this account).
+	status := "created"
+	code := http.StatusCreated
+	if !created {
+		status = "registered"
+		code = http.StatusOK
+	}
+	writeJSON(w, code, registerResponse{
+		Status: status,
 		Handle: label + "." + domain,
 	})
 }

@@ -85,6 +85,10 @@ type app struct {
 	// The real implementation (porkbun.go, not yet written) talks to the
 	// Porkbun API; tests use a fake.
 	provisioner provisioner
+	// claims is the persistent label→DID registry.  The handler acquires
+	// the label in it (put-if-absent) before provisioning, so an existing
+	// handle can never be silently re-registered by a different account.
+	claims *claims
 }
 
 // --- request / response types (JSON) ---

@@ -48,7 +48,15 @@ func main() {
 
 	// TODO(defense): wrap the mux with per-IP rate limiting before this is
 	// exposed publicly — see AGENTS.md "Planned defenses".
-	srv := &app{domains: cfg.managedSet(), provisioner: stubProvisioner{}}
+	// The claims store is the durable label→DID registry; a failed open is
+	// fatal because running without it would allow silent handle theft.
+	claimStore, err := openClaims(claimsDBName)
+	if err != nil {
+		log.Fatalf("failed to open claims database %q: %v", claimsDBName, err)
+	}
+	defer claimStore.close()
+
+	srv := &app{domains: cfg.managedSet(), provisioner: stubProvisioner{}, claims: claimStore}
 	log.Println("WARNING: stub provisioner active — registrations will be accepted but no DNS records are created")
 
 	mux := http.NewServeMux()
@@ -61,7 +69,10 @@ func main() {
 	// yeen.world on yeen.world — and post to the same origin, so the Host
 	// header carries the domain selection for /register too.
 
-	httpServer := &http.Server{Addr: cfg.Addr, Handler: mux}
+	// Per-IP rate limiting wraps everything; see ratelimit.go.
+	rl := newRateLimiter()
+
+	httpServer := &http.Server{Addr: cfg.Addr, Handler: rl.middleware(mux)}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

@@ -58,21 +58,25 @@ func parseDomain(raw string) (string, error) {
 // (_atproto et al.) fail the character class and are additionally reserved.
 var handleLabelRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// Bluesky's app-level username rules, from the official support article
-// "What is the suggested user handle format?"
-// (blueskyweb.zendesk.com, "User Handle – Error Messages"):
+// Bluesky's app-level username rules and niceat's own policies.
 //
-//   - "Handle Too Short – Must be at least 3 characters"
-//   - "Handle Too Long – Custom domain users: up to 30 characters total"
+// The app-level rules come from the official support article "What is the
+// suggested user handle format?" (blueskyweb.zendesk.com, "User Handle –
+// Error Messages"): "Handle Too Long – Custom domain users: up to 30
+// characters total".  The AT Proto handle spec allows far more (253 chars
+// total, 244 in practice because DNS verification prefixes "_atproto."),
+// but a handle longer than 30 characters cannot be entered in bsky.app's
+// custom-domain handle flow — the user would own a DNS record for a handle
+// the official app will not let them claim.  niceat enforces the app's
+// budget so every provisioned handle is claimable end-to-end.
 //
-// The AT Proto handle spec allows far more (253 chars total, 244 in practice
-// because DNS verification prefixes "_atproto."), but a handle longer than
-// 30 characters cannot be entered in bsky.app's custom-domain handle flow —
-// the user would own a DNS record for a handle the official app will not let
-// them claim.  niceat enforces the app's budget so every provisioned handle
-// is claimable end-to-end.
+// minUserHandleLabel is a niceat policy, not an upstream requirement:
+// Bluesky enforces no minimum for custom-domain handles (short ones like
+// s.example.com work).  We keep a floor anyway — short labels are few and
+// valuable under any single domain, and a minimum discourages squatting
+// them one or two characters at a time.
 const (
-	// minUserHandleLabel is the shortest label Bluesky accepts (3).
+	// minUserHandleLabel is the shortest label niceat will provision.
 	minUserHandleLabel = 3
 	// maxAppHandleLength is the composed handle length (label + "." +
 	// domain) bsky.app accepts for custom-domain handles.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -48,7 +49,23 @@ func newTestApp(t *testing.T, p provisioner, domains ...string) *app {
 		}
 		managed[d] = true
 	}
-	return &app{domains: managed, provisioner: p}
+	return &app{domains: managed, provisioner: p, claims: newTestClaims(t)}
+}
+
+// newTestClaims opens a claims store backed by a fresh temp database,
+// closed and removed when the test ends.
+func newTestClaims(t *testing.T) *claims {
+	t.Helper()
+	store, err := openClaims(filepath.Join(t.TempDir(), "claims.bolt"))
+	if err != nil {
+		t.Fatalf("open claims store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.close(); err != nil {
+			t.Errorf("close claims store: %v", err)
+		}
+	})
+	return store
 }
 
 // doRegister sends a POST /register request to the given Host with the given

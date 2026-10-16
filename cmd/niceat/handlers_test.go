@@ -201,6 +201,75 @@ func TestHandleRegisterProvisionerError(t *testing.T) {
 	}
 }
 
+// otherDID is a second valid did:plc distinct from validPLC, for exercising
+// ownership conflicts.
+func otherDID() string {
+	return "did:plc:" + strings.Repeat("y", 24)
+}
+
+func TestHandleRegisterClaimSemantics(t *testing.T) {
+	p := &fakeProvisioner{}
+	a := newTestApp(t, p)
+	body := registerBody(t, "john", validPLC)
+
+	// First registration claims the label.
+	w := doRegister(t, a, body, "")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for fresh claim, got %d: %s", w.Code, w.Body.String())
+	}
+	if resp := decodeRegister(t, w); resp.Status != "created" {
+		t.Fatalf("expected status \"created\", got %q", resp.Status)
+	}
+
+	// The same DID re-submitting is an idempotent 200, and the
+	// provisioner runs again so a crash-dangling claim is healed.
+	w = doRegister(t, a, body, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for same-DID repeat, got %d: %s", w.Code, w.Body.String())
+	}
+	if resp := decodeRegister(t, w); resp.Status != "registered" {
+		t.Fatalf("expected status \"registered\", got %q", resp.Status)
+	}
+	if len(p.calls) != 2 {
+		t.Fatalf("expected provisioner to run again on idempotent repeat, got %d calls", len(p.calls))
+	}
+
+	// A different DID is refused, and the provisioner must not run: the
+	// existing owner's record must never be touched.
+	w = doRegister(t, a, registerBody(t, "john", otherDID()), "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for different DID, got %d: %s", w.Code, w.Body.String())
+	}
+	if d := decodeDetail(t, w); !strings.Contains(d, "not available") {
+		t.Fatalf("expected unavailability detail, got %q", d)
+	}
+	if len(p.calls) != 2 {
+		t.Fatalf("provisioner must not be called for a conflicting DID, got %+v", p.calls)
+	}
+}
+
+func TestHandleRegisterProvisionerFailureReleasesClaim(t *testing.T) {
+	p := &fakeProvisioner{err: errors.New("porkbun is down")}
+	a := newTestApp(t, p)
+
+	w := doRegister(t, a, registerBody(t, "john", validPLC), "")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// The failed registration must not squat the label: swapping in a
+	// working provisioner and registering with a *different* DID must
+	// succeed, proving the claim was rolled back.
+	a.provisioner = &fakeProvisioner{}
+	w = doRegister(t, a, registerBody(t, "john", otherDID()), "")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 after rollback, got %d: %s", w.Code, w.Body.String())
+	}
+	if resp := decodeRegister(t, w); resp.Status != "created" {
+		t.Fatalf("expected status \"created\" after rollback, got %q", resp.Status)
+	}
+}
+
 func TestResolveDomain(t *testing.T) {
 	a := newTestApp(t, &fakeProvisioner{}, "wagg.ing", "Yeen.World")
 
