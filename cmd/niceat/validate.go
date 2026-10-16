@@ -30,17 +30,75 @@ func parseDomain(raw string) (string, error) {
 	if !domainRegex.MatchString(domain) {
 		return "", fmt.Errorf("must be a dotted domain of DNS labels (letters, digits, hyphens)")
 	}
+
+	// AT Proto handle constraints on the final label (atproto.com/specs/
+	// handle): the TLD "can not start with a numeric digit", and the
+	// reference implementation additionally refuses registration under
+	// reserved TLDs (disallowedTLDs).  A deployment under such a domain
+	// could never produce a valid handle, so both fail at startup.
+	tld := domain[strings.LastIndex(domain, ".")+1:]
+	if tld[0] < 'a' || tld[0] > 'z' {
+		return "", fmt.Errorf("TLD must start with a letter, not a digit (AT Proto handle rule)")
+	}
+	if disallowedTLDs[tld] {
+		return "", fmt.Errorf("TLD %q is reserved and cannot host AT Proto handles", tld)
+	}
 	return domain, nil
+}
+
+// handleLabelRegex matches a single DNS label: 1-63 characters of [a-z0-9-],
+// not starting or ending with a hyphen.  This is the syntax shared by DNS
+// labels and AT Proto handle segments (atproto.com/specs/handle:
+// "segments can not start or end with a hyphen", 1-63 chars, ASCII
+// letters/digits/hyphens only; punycode "xn--" labels are explicitly valid).
+//
+// Input is lowercased and trimmed before matching, so the lowercase-only
+// class is fine.  Dots are rejected separately with a specific message so a
+// caller cannot reach outside the served domain; underscore-prefixed labels
+// (_atproto et al.) fail the character class and are additionally reserved.
+var handleLabelRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// Bluesky's app-level username rules, from the official support article
+// "What is the suggested user handle format?"
+// (blueskyweb.zendesk.com, "User Handle – Error Messages"):
+//
+//   - "Handle Too Short – Must be at least 3 characters"
+//   - "Handle Too Long – Custom domain users: up to 30 characters total"
+//
+// The AT Proto handle spec allows far more (253 chars total, 244 in practice
+// because DNS verification prefixes "_atproto."), but a handle longer than
+// 30 characters cannot be entered in bsky.app's custom-domain handle flow —
+// the user would own a DNS record for a handle the official app will not let
+// them claim.  niceat enforces the app's budget so every provisioned handle
+// is claimable end-to-end.
+const (
+	// minUserHandleLabel is the shortest label Bluesky accepts (3).
+	minUserHandleLabel = 3
+	// maxAppHandleLength is the composed handle length (label + "." +
+	// domain) bsky.app accepts for custom-domain handles.
+	maxAppHandleLength = 30
+)
+
+// disallowedTLDs are the TLDs the AT Proto reference implementation refuses
+// to register handles under (@atproto/syntax handle.ts, DISALLOWED_TLDS).
+// A niceat deployment under one of these could never produce a usable
+// handle, so parseDomain rejects them at startup.
+var disallowedTLDs = map[string]bool{
+	"local": true, "arpa": true, "invalid": true, "localhost": true,
+	"internal": true, "example": true, "alt": true, "onion": true,
 }
 
 // normalizeHandle validates and canonicalizes a requested handle label.
 //
 // The input is the subdomain label a user wants (e.g. "john" to become
 // john.example.com).  Surrounding whitespace is trimmed and uppercase is
-// lowercased — DNS names are case-insensitive, so this is a canonicalization
-// rather than a semantic change.  The result must be a single DNS label:
-// 1-63 characters of [a-z0-9-], not starting or ending with a hyphen, and
-// not on the reserved list.
+// lowercased — DNS names and handles are case-insensitive, so this is a
+// canonicalization rather than a semantic change.  The result must be a
+// single DNS label that is also a valid Bluesky username: 3-63 characters of
+// [a-z0-9-], not starting or ending with a hyphen, and not on the reserved
+// list.  (See handleLabelRegex and minUserHandleLabel for the union of the
+// two specs; the composed-handle length budget is checked separately by
+// ensureHandleClaimable once the target domain is known.)
 //
 // The returned error's message is safe to show the user verbatim.
 func normalizeHandle(raw string) (string, error) {
@@ -51,13 +109,32 @@ func normalizeHandle(raw string) (string, error) {
 	if strings.Contains(handle, ".") {
 		return "", fmt.Errorf("handle must be a single name, not a full domain (dots are not allowed)")
 	}
-	if !handleRegex.MatchString(handle) {
-		return "", fmt.Errorf("handle must be 1-63 characters: letters, digits, or hyphens, and cannot start or end with a hyphen")
+	if len(handle) < minUserHandleLabel {
+		return "", fmt.Errorf("handle must be at least %d characters", minUserHandleLabel)
+	}
+	if !handleLabelRegex.MatchString(handle) {
+		return "", fmt.Errorf("handle must be 3-63 characters: letters, digits, or hyphens, and cannot start or end with a hyphen")
 	}
 	if reservedLabels[handle] {
 		return "", fmt.Errorf("handle %q is not available", handle)
 	}
 	return handle, nil
+}
+
+// ensureHandleClaimable checks the composed handle (label + "." + domain)
+// against bsky.app's custom-domain budget: at most maxAppHandleLength
+// characters total, per the official Bluesky support docs.  This is the
+// binding constraint — it sits far below the AT Proto limits (253 total,
+// 244 with the "_atproto." DNS prefix) — so one check covers both specs.
+//
+// The error names the per-domain maximum so the frontend can display it
+// directly ("at most 21 characters under wagg.ing").
+func ensureHandleClaimable(label, domain string) error {
+	max := maxAppHandleLength - len(domain) - 1
+	if len(label) > max {
+		return fmt.Errorf("handle is too long: at most %d characters are available under %s", max, domain)
+	}
+	return nil
 }
 
 // validateDID validates a Bluesky account DID.

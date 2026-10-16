@@ -76,6 +76,10 @@ func TestHandleRegisterInvalidInputs(t *testing.T) {
 		{"non-DID string", "john", "not-a-did"},
 		{"unsupported method", "john", "did:key:z6MkhaXg"},
 		{"short plc", "john", "did:plc:short"},
+		// Valid label shape, but the composed handle exceeds bsky.app's
+		// 30-char custom-domain budget: example.com leaves 18 for the
+		// label, and this one is 22.
+		{"composed handle too long", strings.Repeat("a", 22), validPLC},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -294,6 +298,34 @@ func TestHandleRegisterUnknownHost(t *testing.T) {
 				t.Fatalf("provisioner must not be called for unknown host, got %+v", p.calls)
 			}
 		})
+	}
+}
+
+func TestHandleRegisterComposedLengthPerDomain(t *testing.T) {
+	// A 20-char label composes to 29 chars under wagg.ing (within bsky.app's
+	// 30-char budget) but to 32 under example.com (over it).  The same
+	// requested name must be accepted or rejected depending on the Host's
+	// domain, since the domain eats into the same 30 characters.
+	label := strings.Repeat("a", 20)
+	body := registerBody(t, label, validPLC)
+
+	waggP := &fakeProvisioner{}
+	waggApp := newTestApp(t, waggP, "wagg.ing")
+	if w := doRegisterAt(t, waggApp, "wagg.ing", body, ""); w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 under wagg.ing, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(waggP.calls) != 1 {
+		t.Fatalf("expected provisioning under wagg.ing, got %+v", waggP.calls)
+	}
+
+	exampleP := &fakeProvisioner{}
+	exampleApp := newTestApp(t, exampleP) // manages example.com
+	w := doRegisterAt(t, exampleApp, "example.com", body, "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 under example.com, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(exampleP.calls) != 0 {
+		t.Fatalf("provisioner must not be called when the composed handle is over budget, got %+v", exampleP.calls)
 	}
 }
 

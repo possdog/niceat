@@ -71,6 +71,12 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Detail: err.Error()})
 		return
 	}
+	// The domain-specific half of the union: the composed handle must fit
+	// bsky.app's custom-domain budget.
+	if err := ensureHandleClaimable(label, domain); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Detail: err.Error()})
+		return
+	}
 	did, err := validateDID(req.DID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Detail: err.Error()})

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -17,18 +18,21 @@ func TestNormalizeHandle(t *testing.T) {
 	}{
 		// --- valid, canonicalized to lowercase without whitespace ---
 		{"simple", "john", "john", false},
+		{"three characters (username minimum)", "abc", "abc", false},
 		{"uppercase normalized", "John", "john", false},
 		{"mixed case and padding", "  MiXeD-CaSe  ", "mixed-case", false},
-		{"single character", "a", "a", false},
-		{"digits", "42", "42", false},
+		{"digits", "42a", "42a", false},
 		{"internal hyphen", "john-doe", "john-doe", false},
 		{"max length (63)", strings.Repeat("a", 63), strings.Repeat("a", 63), false},
 		{"punycode label", "xn--bcher-kva", "xn--bcher-kva", false},
 		{"trailing digit after hyphen run", "a--b", "a--b", false},
+		{"all digits at username minimum", "123", "123", false},
 
 		// --- invalid format ---
 		{"empty", "", "", true},
 		{"whitespace only", "   ", "", true},
+		{"single character (below username minimum)", "a", "", true},
+		{"two characters (below username minimum)", "ab", "", true},
 		{"leading hyphen", "-john", "", true},
 		{"trailing hyphen", "john-", "", true},
 		{"too long (64)", strings.Repeat("a", 64), "", true},
@@ -90,6 +94,13 @@ func TestParseDomain(t *testing.T) {
 		{"multi-label", "handles.wagg.ing", "handles.wagg.ing", false},
 		{"hyphenated label", "my-site.example.com", "my-site.example.com", false},
 
+		// --- AT Proto handle constraints on the TLD ---
+		{"TLD starts with digit", "foo.123", "", true},
+		{"TLD disallowed (.local)", "foo.local", "", true},
+		{"TLD disallowed (.onion)", "foo.onion", "", true},
+		{"TLD disallowed (.example)", "foo.example", "", true},
+		{"TLD disallowed case differs (.invalid)", "foo.INVALID", "", true}, // normalized to lowercase first
+
 		// --- invalid ---
 		{"empty", "", "", true},
 		{"whitespace only", "   ", "", true},
@@ -120,6 +131,49 @@ func TestParseDomain(t *testing.T) {
 				t.Fatalf("parseDomain(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEnsureHandleClaimable(t *testing.T) {
+	// wagg.ing is 8 chars, so the label budget is 30 - 8 - 1 = 21.
+	const domain = "wagg.ing"
+	const max = 21
+
+	tests := []struct {
+		name    string
+		label   string
+		wantErr bool
+	}{
+		{"typical handle", "john", false},
+		{"label at exact budget", strings.Repeat("a", max), false},
+		{"label one over budget", strings.Repeat("a", max+1), true},
+		{"label at DNS-label max", strings.Repeat("a", 63), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ensureHandleClaimable(tt.label, domain)
+			if tt.wantErr && err == nil {
+				t.Fatalf("ensureHandleClaimable(%q, %q) succeeded, expected error", tt.label, domain)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("ensureHandleClaimable(%q, %q) unexpected error: %v", tt.label, domain, err)
+			}
+			// The over-budget error must name the per-domain maximum
+			// so the frontend can surface it directly.
+			if tt.wantErr && !strings.Contains(err.Error(), fmt.Sprintf("%d", max)) {
+				t.Fatalf("expected error to name max %d, got: %v", max, err)
+			}
+		})
+	}
+
+	// The exact-30-char composed handle must be accepted: the budget is
+	// inclusive.
+	composed := "aaaaaaaaaaaaaaaaaaaaa" + "." + domain // 21 + 1 + 8 = 30
+	if len(composed) != maxAppHandleLength {
+		t.Fatalf("test fixture: composed handle is %d chars, want %d", len(composed), maxAppHandleLength)
+	}
+	if err := ensureHandleClaimable("aaaaaaaaaaaaaaaaaaaaa", domain); err != nil {
+		t.Fatalf("composed handle of exactly %d chars rejected: %v", maxAppHandleLength, err)
 	}
 }
 

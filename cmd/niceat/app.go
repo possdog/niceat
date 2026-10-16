@@ -17,13 +17,6 @@ const maxDIDLength = 200
 
 // Pre-compiled validation regexes.
 //
-// handleRegex matches a single DNS label: 1-63 characters of [a-z0-9-], not
-// starting or ending with a hyphen.  Input is lowercased and trimmed before
-// matching, so the lowercase-only class is fine.  Underscores and dots are
-// deliberately rejected: dots would let a caller reach outside the served
-// domain, and underscore-prefixed labels (_atproto et al.) are reserved for
-// the protocol's own records.
-//
 // plcRegex matches did:plc DIDs: the "did:plc:" prefix followed by exactly 24
 // characters of the Base32-BTC alphabet ([a-z2-7]) used by the plc method.
 //
@@ -32,10 +25,12 @@ const maxDIDLength = 200
 // did:web spec's pchar set plus ":" and "@"; it excludes whitespace, quotes
 // and semicolons, so a matched DID can never inject additional content into
 // the TXT record we publish.
+//
+// The handle label regex lives in validate.go next to normalizeHandle, which
+// enforces the union of the DNS-label and Bluesky-username specs.
 var (
-	handleRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	plcRegex    = regexp.MustCompile(`^did:plc:[a-z2-7]{24}$`)
-	webRegex    = regexp.MustCompile(`^did:web:[A-Za-z0-9._~%!$&'()*+,;=:@/-]+$`)
+	plcRegex = regexp.MustCompile(`^did:plc:[a-z2-7]{24}$`)
+	webRegex = regexp.MustCompile(`^did:web:[A-Za-z0-9._~%!$&'()*+,;=:@/-]+$`)
 )
 
 // reservedLabels are subdomain labels that can never be claimed through the

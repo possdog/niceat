@@ -73,19 +73,38 @@ non-POST (from the mux's `POST /register` pattern); 413 body over 4 KiB;
 415 Content-Type not `application/json`; 421 Host not a managed domain;
 500 provisioning failure.
 
-Validation (in `validate.go`, all error messages user-displayable):
+Validation (in `validate.go`, all error messages user-displayable).  A
+requested handle must be a valid Bluesky username **and** a valid DNS
+subdomain — the union of both specs, verified against the AT Proto handle
+spec (atproto.com/specs/handle), the reference implementation
+(`@atproto/syntax` `handle.ts`), and Bluesky's official support docs
+("What is the suggested user handle format?"):
 
-- **Handle** is a single DNS label — 1–63 chars `[a-z0-9-`, no leading/trailing
-  hyphen, no dots or underscores — lowercased and whitespace-trimmed first.
-  Dots are rejected explicitly so a caller cannot reach outside the served
-  domain.  Labels in `reservedLabels` (app.go) are refused: infrastructure
-  names (www, mx, ns1, ...) and AT Protocol names (_atproto, bsky, plc, ...).
-  The list is meant to be over-inclusive; extending it is safe, recalling a
-  claimed label is not.
+- **Label** (`normalizeHandle`): trimmed and lowercased; 3-63 chars
+  `[a-z0-9-]`, no leading/trailing hyphen, no dots (explicitly, so a caller
+  cannot reach outside the served domain), no underscores.  Min 3 is
+  Bluesky's "Handle Too Short" rule; 63 and the character class are the
+  shared DNS-label / AT Proto segment rules; punycode `xn--` labels are
+  valid per the spec.  Labels in `reservedLabels` (app.go) are refused:
+  infrastructure names (www, mx, ns1, ...) and AT Protocol names
+  (_atproto, bsky, plc, ...).  The list is meant to be over-inclusive;
+  extending it is safe, recalling a claimed label is not.
+- **Composed handle** (`ensureHandleClaimable`): `label + "." + domain` must
+  be at most 30 characters — bsky.app's limit for custom-domain handles
+  ("Handle Too Long ... Custom domain users: up to 30 characters total").
+  The budget is per-domain (wagg.ing leaves 21 label chars, example.com
+  leaves 18).  This is deliberately stricter than the AT Proto limits (253
+  total, 244 with the `_atproto.` DNS prefix): a longer handle would be
+  protocol-valid but unclaimable through the official app's UI.
+- **Configured domains** (`parseDomain`): in addition to DNS shape, the
+  TLD must start with a letter (AT Proto rule) and must not be one of the
+  reserved TLDs (`disallowedTLDs`: .local, .arpa, .invalid, .localhost,
+  .internal, .example, .alt, .onion), since no handle under them could
+  ever be valid.
 - **DID** accepts only `did:plc` (24 chars `[a-z2-7]`) and `did:web` (pchar
-  charset), max 200 bytes.  Tight per-method regexes guarantee the DID cannot
-  inject extra content into the `did=<DID>` TXT record value.  DIDs are
-  case-sensitive and are never normalized.
+  charset), max 200 bytes.  Tight per-method regexes guarantee the DID
+  cannot inject extra content into the `did=<DID>` TXT record value.  DIDs
+  are case-sensitive and are never normalized.
 
 ## Architecture
 
