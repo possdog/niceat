@@ -28,12 +28,22 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", defaultConfigPath, "path to the JSON config file")
+	// The config path is relative to the working directory by default, so
+	// a service manager only needs to set the working directory.
+	configPath := flag.String("config", defaultConfigPath, "path to the JSON config file, relative to the current working directory")
+	// -addr overrides the config file's "addr" — handy when a host runs
+	// several services and ports are handed out dynamically (e.g. -addr
+	// :0 for an ephemeral port).  Empty means "use the config file".
+	addrOverride := flag.String("addr", "", "HTTP listen address; overrides the config file's \"addr\"")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("loading config: %v", err)
+	}
+	// Precedence: -addr flag > config "addr" > default.
+	if *addrOverride != "" {
+		cfg.Addr = *addrOverride
 	}
 
 	// TODO(defense): wrap the mux with per-IP rate limiting before this is

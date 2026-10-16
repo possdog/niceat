@@ -32,8 +32,16 @@ directory; the file is instance-specific and gitignored:
 
 ```bash
 go build -o niceat ./cmd/niceat
-./niceat -config niceat.json
+./niceat                       # reads ./niceat.json, listens on config "addr"
+./niceat -addr :8123           # same config, listen address overridden
 ```
+
+Only two flags exist.  `-config` defaults to `niceat.json` relative to the
+current working directory, so a service manager just needs to set the
+working directory.  `-addr` overrides the config file's `addr` (useful when
+a host runs several services and ports are handed out dynamically, e.g.
+`-addr :0`); empty means "use the config".  Precedence:
+`-addr` flag > config `addr` > `:8080` default.
 
 `porkbun_api_key.txt` / `porkbun_secret_key.txt` in the working directory
 hold the sandbox Porkbun credentials (gitignored; never commit, never
