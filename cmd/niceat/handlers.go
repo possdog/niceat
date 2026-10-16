@@ -28,7 +28,7 @@ import (
 //	415 — Content-Type is not application/json
 //	421 — Host header does not match a domain this server manages
 //	429 — caller exceeded its per-IP rate limit (middleware)
-//	500 — DNS provisioning or claims-store failure
+//	500 — DNS provisioning failure
 //
 // Error bodies use the shared {"detail": "..."} shape; detail strings for 4xx
 // are written for display to the end user, while 5xx details stay generic so
@@ -46,7 +46,7 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMisdirectedRequest, errorResponse{Detail: "This host is not available for handle registration"})
 		return
 	}
-	// --- 1. Content-Type gate ---
+	// --- 2. Content-Type gate ---
 	// Registration is a JSON API; rejecting other types up front keeps
 	// form-encoded or multipart bodies from being silently misparsed.
 	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
@@ -54,7 +54,7 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- 2. Bound and decode the body ---
+	// --- 3. Bound and decode the body ---
 	// MaxBytesReader caps how much a client can make us buffer; the
 	// resulting *http.MaxBytesError maps to 413 rather than a generic 400.
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
@@ -69,7 +69,7 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- 3. Validate and normalize inputs ---
+	// --- 4. Validate and normalize inputs ---
 	label, err := normalizeHandle(req.Handle)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Detail: err.Error()})
@@ -87,39 +87,27 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- 4. Claim the label (put-if-absent) ---
-	// The claim is acquired *before* provisioning so two concurrent
-	// requests cannot both win the same label, and so an existing handle
-	// can never be silently re-bound to a different account.
-	created, existingDID, err := a.claims.tryClaim(domain, label, did)
+	// --- 5. Provision (DNS is the claim store) ---
+	// The existence and content of the _atproto TXT record are the single
+	// source of truth for whether a handle is taken and by whom — there is
+	// deliberately no local ledger to desync with the future reaper or
+	// manual Porkbun edits.  The check-then-create flow runs under a
+	// per-label lock so two concurrent requests for the same label cannot
+	// both pass the "no record" check and stack two records.
+	unlock := a.locks.acquire(domain, label)
+	defer unlock()
+
+	outcome, err := a.provisioner.Provision(r.Context(), domain, label, did)
 	if err != nil {
-		log.Printf("ERROR: claiming %s.%s failed: %v", label, domain, err)
+		log.Printf("ERROR: provisioning _atproto.%s.%s failed: %v", label, domain, err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Detail: "Internal server error"})
 		return
 	}
-	if !created && existingDID != did {
+	if outcome == outcomeConflict {
 		// Deliberately the same wording as the reserved-name error: a
 		// prober learns only "not available", never whether a handle
 		// is taken by a person or blocked by policy.
 		writeJSON(w, http.StatusConflict, errorResponse{Detail: fmt.Sprintf("handle %q is not available", label)})
-		return
-	}
-
-	// --- 5. Provision the DNS record ---
-	// This also runs on the idempotent same-DID repeat: Porkbun treats an
-	// identical re-create as success, so a claim left dangling by a crash
-	// between claim and provision is healed by its owner re-submitting.
-	if err := a.provisioner.Provision(r.Context(), domain, label, did); err != nil {
-		// A newly created claim must be rolled back so the failure does
-		// not squat the label; a pre-existing claim belongs to its
-		// owner and stays.
-		if created {
-			if rerr := a.claims.release(domain, label); rerr != nil {
-				log.Printf("ERROR: releasing claim on %s.%s after provisioning failure: %v", label, domain, rerr)
-			}
-		}
-		log.Printf("ERROR: provisioning _atproto.%s.%s failed: %v", label, domain, err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Detail: "Internal server error"})
 		return
 	}
 
@@ -128,7 +116,7 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// same DID (the handle was already bound to this account).
 	status := "created"
 	code := http.StatusCreated
-	if !created {
+	if outcome == outcomeRegistered {
 		status = "registered"
 		code = http.StatusOK
 	}

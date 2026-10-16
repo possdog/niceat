@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"sync"
 )
 
 // maxRequestBody bounds the size of a registration request.  A well-formed
@@ -82,13 +83,44 @@ type app struct {
 	// single deployment can serve *.wagg.ing, *.yeen.world, ... at once.
 	domains map[string]bool
 	// provisioner creates the DNS record that maps a handle to a DID.
-	// The real implementation (porkbun.go, not yet written) talks to the
-	// Porkbun API; tests use a fake.
+	// The Porkbun client (porkbun.go) is the real implementation; without
+	// credentials an in-memory fallback is used.  Tests use fakes.
 	provisioner provisioner
-	// claims is the persistent label→DID registry.  The handler acquires
-	// the label in it (put-if-absent) before provisioning, so an existing
-	// handle can never be silently re-registered by a different account.
-	claims *claims
+	// locks serializes the check-then-create registration flow per
+	// (domain, label) pair; see handlers.go for why.
+	locks labelLocks
+}
+
+// labelLocks provides mutual exclusion per (domain, label) pair.  The guard
+// map itself is never shrunk: the number of concurrently contended labels is
+// tiny and bounded by real traffic, so entries are simply reused.
+type labelLocks struct {
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+}
+
+// acquire locks the (domain, label) pair and returns the unlock func.  The
+// DNS-as-truth registration flow is a check-then-create over two Porkbun
+// calls; without this lock, two concurrent requests for the same label
+// could both see "no record" and both create, stacking two TXT records on
+// one _atproto name — which per the atproto spec breaks the handle for both
+// parties.  A process-local lock suffices while the deployment is a single
+// instance; multiple instances would need a shared lock (or Porkbun-side
+// conditional creates, which the API does not offer).
+func (ll *labelLocks) acquire(domain, label string) func() {
+	key := domain + "\x00" + label
+	ll.mu.Lock()
+	m := ll.locks[key]
+	if m == nil {
+		if ll.locks == nil {
+			ll.locks = make(map[string]*sync.Mutex)
+		}
+		m = &sync.Mutex{}
+		ll.locks[key] = m
+	}
+	ll.mu.Unlock()
+	m.Lock()
+	return m.Unlock
 }
 
 // --- request / response types (JSON) ---

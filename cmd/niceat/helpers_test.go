@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -19,18 +18,22 @@ type fakeCall struct {
 	did    string
 }
 
-// fakeProvisioner is the in-memory provisioner used by handler tests.  It
-// records every call, and can be armed with an error to simulate a DNS
-// backend failure.
+// fakeProvisioner is the scriptable provisioner used by handler tests.  It
+// records every call, and can be armed with a fixed outcome and/or an
+// error to simulate DNS backend behavior.
 type fakeProvisioner struct {
-	calls []fakeCall
-	err   error
+	calls   []fakeCall
+	outcome provisionOutcome
+	err     error
 }
 
-func (f *fakeProvisioner) Provision(ctx context.Context, domain, label, did string) error {
+func (f *fakeProvisioner) Provision(ctx context.Context, domain, label, did string) (provisionOutcome, error) {
 	_ = ctx
 	f.calls = append(f.calls, fakeCall{domain: domain, label: label, did: did})
-	return f.err
+	if f.err != nil {
+		return 0, f.err
+	}
+	return f.outcome, nil
 }
 
 // newTestApp creates an app managing the given domains (parsed with the same
@@ -49,23 +52,7 @@ func newTestApp(t *testing.T, p provisioner, domains ...string) *app {
 		}
 		managed[d] = true
 	}
-	return &app{domains: managed, provisioner: p, claims: newTestClaims(t)}
-}
-
-// newTestClaims opens a claims store backed by a fresh temp database,
-// closed and removed when the test ends.
-func newTestClaims(t *testing.T) *claims {
-	t.Helper()
-	store, err := openClaims(filepath.Join(t.TempDir(), "claims.bolt"))
-	if err != nil {
-		t.Fatalf("open claims store: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := store.close(); err != nil {
-			t.Errorf("close claims store: %v", err)
-		}
-	})
-	return store
+	return &app{domains: managed, provisioner: p}
 }
 
 // doRegister sends a POST /register request to the given Host with the given

@@ -6,7 +6,13 @@ niceat lets communities self-service Bluesky handles under a shared domain:
 a web form (not yet built) collects a desired handle label plus the user's
 Bluesky account DID, and this API provisions the `_atproto` TXT record that
 binds `<label>.<domain>` to the DID via the Porkbun DNS API.  Go 1.26,
-standard library only, one package at `cmd/niceat/`.
+standard library plus `golang.org/x/time`, one package at `cmd/niceat/`.
+
+**DNS is the claim store.**  Whether a handle is available — and who it
+belongs to — is decided entirely by the existence and content of the
+`_atproto` TXT record in Porkbun.  There is deliberately no local ledger
+that could desync with the planned reaper, manual Porkbun dashboard edits,
+or zone restores.
 
 ## Build & run
 
@@ -44,13 +50,13 @@ a host runs several services and ports are handed out dynamically, e.g.
 `-addr` flag > config `addr` > `:8080` default.
 
 `porkbun_api_key.txt` / `porkbun_secret_key.txt` in the working directory
-hold the sandbox Porkbun credentials (gitignored; never commit, never
-hard-code them into source or logs).  The claims store lives in
-`claims.bolt` in the same directory, also gitignored.
-
-The DNS backend is currently `stubProvisioner`: it logs what it would create
-and returns success, so requests "work" end-to-end but no DNS record exists.
-The binary warns about this at startup.
+hold the Porkbun credentials (gitignored; never commit, never hard-code
+them into source or logs).  Their presence selects the real Porkbun
+backend; without the pair, the service falls back to `memoryProvisioner`
+(see provision.go) — same semantics, but nothing is published and state is
+lost on restart, so it must never front real traffic.  Current keys are
+sandbox (`pk1_sb_`/`sk1_sb_`): Porkbun requests are simulated, so live
+smoke tests are safe.
 
 ## The API (what exists today)
 
@@ -74,9 +80,8 @@ this DID); 400 invalid handle/DID or malformed JSON; 405 non-POST (from the
 mux's `POST /register` pattern); 409 handle claimed by a different DID
 (worded identically to the reserved-name refusal, so probers learn nothing);
 413 body over 4 KiB; 415 Content-Type not `application/json`; 421 Host not a
-managed domain; 429 per-IP rate limit exceeded; 500 provisioning or
-claims-store failure (generic detail; backend errors are logged, not
-leaked).
+managed domain; 429 per-IP rate limit exceeded; 500 provisioning failure
+(generic detail; backend errors are logged, not leaked).
 
 Validation (in `validate.go`, all error messages user-displayable).  A
 requested handle must be a valid Bluesky username **and** a valid DNS
@@ -118,28 +123,38 @@ spec (atproto.com/specs/handle), the reference implementation
 
 ```
 cmd/niceat/
-├── main.go        — -config flag, mux, graceful shutdown
+├── main.go        — flags, config/credential loading, mux, graceful shutdown
 ├── config.go      — JSON config type, strict loadConfig, managedSet
-├── app.go         — app struct (managed-domain set), regexes, reservedLabels, JSON types
+├── app.go         — app struct, labelLocks, regexes, reservedLabels, JSON types
 ├── handlers.go    — resolveDomain, handleRegister + writeJSON
 ├── validate.go    — parseDomain, normalizeHandle, validateDID
-├── store.go       — bbolt-backed claims store (tryClaim, release)
 ├── ratelimit.go   — per-IP token bucket middleware
-├── provision.go   — provisioner interface, stubProvisioner, Porkbun notes
-└── *_test.go      — tests alongside source, fakeProvisioner in helpers_test.go
+├── provision.go   — provisioner interface + outcomes, memoryProvisioner
+├── porkbun.go     — Porkbun client: retrieveByNameType + create
+└── *_test.go      — tests alongside source, fakes in helpers_test.go / porkbun_test.go
 ```
 
-Two third-party dependencies exist alongside the standard library, both
-chosen to match nicelink: `go.etcd.io/bbolt` (embedded, single-writer KV
-store — right shape for a small persistent claims map) and
-`golang.org/x/time/rate` (token buckets).
+One third-party dependency exists alongside the standard library, matching
+nicelink: `golang.org/x/time/rate` (token buckets).  (bbolt was used by the
+claims store and was removed with it.)
 
 The handler only sees the `provisioner` interface
-(`Provision(ctx, domain, label, did)`), so `porkbun.go` can be added without
-touching the HTTP layer; the domain argument is the Host-resolved zone, so
-the Porkbun client automatically operates on the matching domain.  Tests use
-`fakeProvisioner`.  Porkbun endpoint details and credential handling are
-recorded as comments in `provision.go`.
+(`Provision(ctx, domain, label, did) (provisionOutcome, error)`), so the DNS
+backend is swappable without touching the HTTP layer; the domain argument is
+the Host-resolved zone, so the Porkbun client automatically operates on the
+matching domain.  The outcome (created / registered / conflict) maps to
+201/200/409 respectively.  `porkbun.go` implements the real client —
+retrieveByNameType for the existence check, create only when absent, with
+sandbox-verified semantics (an exact-duplicate create is 400
+`DUPLICATE_RECORD` with `existingId`; a same-name/different-content create
+would stack a second TXT record and break the handle, hence the pre-check).
+Tests use `fakeProvisioner` (handler) and `fakePorkbunServer` (client).
+
+Because registration is a check-then-create over two Porkbun calls, the
+handler serializes it per (domain, label) with `labelLocks` (app.go): two
+concurrent requests for the same label must not both pass the "no record"
+check and stack records.  The lock is process-local, which is correct only
+while the deployment is a single instance.
 
 ## Planned frontend (not yet built)
 
@@ -151,16 +166,14 @@ TODO(frontend) note in main.go.
 
 ## Defenses
 
-- **Claims store** (`store.go`) — bbolt file `claims.bolt` in the working
-  directory (gitignored, created on first run).  `tryClaim` is a
-  put-if-absent inside a single write transaction, so concurrent requests
-  cannot both win a label and an existing handle can never be silently
-  re-bound to a different account.  The claim is taken *before*
-  provisioning: a second request for a taken label is honored only as an
-  idempotent repeat by the same DID (200, and the provisioner runs again so
-  a claim left dangling by a crash is healed), and refused for any other
-  DID (409).  If provisioning fails on a *newly created* claim, the claim
-  is released so the failure does not squat the label.
+- **DNS as the claim store** (`porkbun.go`) — availability and ownership are
+  read from the `_atproto` TXT record itself (retrieveByNameType), and the
+  record is created only when absent.  A same-DID repeat is an idempotent
+  200; a different DID is refused with 409.  A multi-record `_atproto` name
+  (corrupt per the atproto spec) is treated as taken, never stacked onto.
+  The check-then-create flow runs under a per-label lock (`labelLocks`) so
+  concurrent requests cannot stack records.  No local ledger exists that
+  could desync with the reaper below.
 - **Per-IP rate limiting** (`ratelimit.go`) — token bucket per client IP
   (x/time/rate): burst 5, sustained 1 per 10 s; excess requests get 429.
   Client IP comes from `RemoteAddr` normally; when the direct peer is a
@@ -169,10 +182,15 @@ TODO(frontend) note in main.go.
   entries.  `X-Real-IP` is never trusted.  Idle IPs are evicted after an
   hour (sweep above a 10 000-entry threshold) to bound memory under
   IP-spray abuse.
-- **DID ownership verification** — deliberately NOT yet implemented.  The
-  form currently attests the DID; a stronger design would verify the
-  requester controls the DID before provisioning.  This is the main
-  remaining gap before public exposure (together with the Porkbun client).
+- **Handle reaper** — deliberately NOT yet implemented.  The account is the
+  authority, not DNS, so DID ownership is not verified at registration;
+  instead a slow background task will iterate the DNS records, resolve
+  each DID (plc.directory for did:plc; the DID document's `aka` field
+  lists the handles an account actually uses), and delete records whose
+  account does not use the handle — freeing the label for someone else.
+  It needs a grace period: users necessarily set their username in-app
+  *after* the DNS record exists, or the bidirectional link could never be
+  established.  This is the main remaining gap before public exposure.
 
 ## Testing / linting
 
@@ -183,9 +201,11 @@ go vet ./cmd/niceat/
 gofmt -l .   # must print nothing
 ```
 
-Tests are fully self-contained (fake provisioner, `httptest`); no network, no
-fixtures.  When changing validation rules, extend the table tests in
-`validate_test.go` — they are the spec for handle/DID acceptance.
+Tests are fully self-contained (`fakeProvisioner`, `fakePorkbunServer`,
+`httptest`); no network, no fixtures.  When changing validation rules, extend
+the table tests in `validate_test.go` — they are the spec for handle/DID
+acceptance.  When changing Porkbun call semantics, extend `porkbun_test.go` —
+its fake mirrors the sandbox-verified duplicate/stacking behavior.
 
 ## Conventions
 
@@ -193,5 +213,6 @@ fixtures.  When changing validation rules, extend the table tests in
   stdlib first, tests beside source, `{"detail": ...}` error bodies.
 - Non-obvious logic (validation choices, security properties) carries a
   comment explaining the *why*, not the *what*.
-- Keep the stub out of any public deployment; `stubProvisioner` reporting
-  success while doing nothing is a foot-gun by design of this phase.
+- Keep the credential-less fallback out of any public deployment;
+  `memoryProvisioner` reporting success while publishing nothing is a
+  foot-gun by design of this phase.

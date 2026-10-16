@@ -3,14 +3,13 @@
 // Serves one endpoint, POST /register, which takes a desired handle label
 // and a Bluesky account DID, and provisions the _atproto TXT record that
 // binds <label>.<domain> to the DID.  One deployment can manage several
-// domains: the -domain flag is repeatable, and each request's Host header
-// selects which domain the handle is registered under.  This lets
-// communities share a domain as Bluesky handles without each member
-// needing to contact the owner.
+// domains, and each request's Host header selects which domain the handle
+// is registered under.  This lets communities share a domain as Bluesky
+// handles without each member needing to contact the owner.
 //
-// Current status: the HTTP layer and validation are complete; DNS
-// provisioning is a logging stub (see provision.go) until the Porkbun
-// client is built.
+// DNS is the claim store: the Porkbun record itself decides whether a
+// handle is available.  Without Porkbun credentials the service falls back
+// to an in-memory provisioner that provisions nothing (see provision.go).
 
 package main
 
@@ -46,18 +45,22 @@ func main() {
 		cfg.Addr = *addrOverride
 	}
 
-	// TODO(defense): wrap the mux with per-IP rate limiting before this is
-	// exposed publicly — see AGENTS.md "Planned defenses".
-	// The claims store is the durable label→DID registry; a failed open is
-	// fatal because running without it would allow silent handle theft.
-	claimStore, err := openClaims(claimsDBName)
+	// The Porkbun credential pair (porkbun_api_key.txt /
+	// porkbun_secret_key.txt in the working directory, gitignored) selects
+	// the real DNS backend.  Without it, the in-memory fallback runs: same
+	// semantics, but nothing is published and state is lost on restart.
+	apiKey, secretKey, haveCreds, err := loadPorkbunCredentials(".")
 	if err != nil {
-		log.Fatalf("failed to open claims database %q: %v", claimsDBName, err)
+		log.Fatalf("loading Porkbun credentials: %v", err)
 	}
-	defer claimStore.close()
+	backend := provisioner(newMemoryProvisioner())
+	if haveCreds {
+		backend = newPorkbunProvisioner(apiKey, secretKey, "")
+	} else {
+		log.Println("WARNING: no Porkbun credentials found — running the in-memory provisioner; registrations are accepted but no DNS records are created")
+	}
 
-	srv := &app{domains: cfg.managedSet(), provisioner: stubProvisioner{}, claims: claimStore}
-	log.Println("WARNING: stub provisioner active — registrations will be accepted but no DNS records are created")
+	srv := &app{domains: cfg.managedSet(), provisioner: backend}
 
 	mux := http.NewServeMux()
 	// Method-specific pattern: non-POST requests to /register get a 405

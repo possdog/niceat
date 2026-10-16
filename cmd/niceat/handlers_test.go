@@ -208,21 +208,24 @@ func otherDID() string {
 }
 
 func TestHandleRegisterClaimSemantics(t *testing.T) {
-	p := &fakeProvisioner{}
+	// The memoryProvisioner applies the same created/registered/conflict
+	// semantics as the Porkbun client, so the handler's mapping from
+	// outcome to status code is exercised against real logic.
+	p := newMemoryProvisioner()
 	a := newTestApp(t, p)
 	body := registerBody(t, "john", validPLC)
 
-	// First registration claims the label.
+	// First registration publishes the record.
 	w := doRegister(t, a, body, "")
 	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201 for fresh claim, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 201 for fresh registration, got %d: %s", w.Code, w.Body.String())
 	}
 	if resp := decodeRegister(t, w); resp.Status != "created" {
 		t.Fatalf("expected status \"created\", got %q", resp.Status)
 	}
 
-	// The same DID re-submitting is an idempotent 200, and the
-	// provisioner runs again so a crash-dangling claim is healed.
+	// The same DID re-submitting is an idempotent 200: the record already
+	// binds the handle to this account.
 	w = doRegister(t, a, body, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for same-DID repeat, got %d: %s", w.Code, w.Body.String())
@@ -230,12 +233,8 @@ func TestHandleRegisterClaimSemantics(t *testing.T) {
 	if resp := decodeRegister(t, w); resp.Status != "registered" {
 		t.Fatalf("expected status \"registered\", got %q", resp.Status)
 	}
-	if len(p.calls) != 2 {
-		t.Fatalf("expected provisioner to run again on idempotent repeat, got %d calls", len(p.calls))
-	}
 
-	// A different DID is refused, and the provisioner must not run: the
-	// existing owner's record must never be touched.
+	// A different DID is refused: the handle is taken.
 	w = doRegister(t, a, registerBody(t, "john", otherDID()), "")
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected 409 for different DID, got %d: %s", w.Code, w.Body.String())
@@ -243,30 +242,44 @@ func TestHandleRegisterClaimSemantics(t *testing.T) {
 	if d := decodeDetail(t, w); !strings.Contains(d, "not available") {
 		t.Fatalf("expected unavailability detail, got %q", d)
 	}
-	if len(p.calls) != 2 {
-		t.Fatalf("provisioner must not be called for a conflicting DID, got %+v", p.calls)
+}
+
+func TestHandleRegisterProvisionerConflict(t *testing.T) {
+	// A provisioner reporting outcomeConflict must surface as 409 with the
+	// shared "not available" wording, and the fake must still have been
+	// consulted (the decision is the DNS backend's, not the handler's).
+	p := &fakeProvisioner{outcome: outcomeConflict}
+	a := newTestApp(t, p)
+	w := doRegister(t, a, registerBody(t, "john", validPLC), "")
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if d := decodeDetail(t, w); !strings.Contains(d, "not available") {
+		t.Fatalf("expected unavailability detail, got %q", d)
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("expected 1 provisioner call, got %d", len(p.calls))
 	}
 }
 
-func TestHandleRegisterProvisionerFailureReleasesClaim(t *testing.T) {
-	p := &fakeProvisioner{err: errors.New("porkbun is down")}
-	a := newTestApp(t, p)
-
+func TestHandleRegisterProvisionerErrorIsRetryable(t *testing.T) {
+	// A failed registration must leave nothing behind (DNS-as-truth has no
+	// separate claim to roll back): swapping in a working provisioner and
+	// retrying the same label must succeed.
+	a := newTestApp(t, &fakeProvisioner{err: errors.New("porkbun is down")})
 	w := doRegister(t, a, registerBody(t, "john", validPLC), "")
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// The failed registration must not squat the label: swapping in a
-	// working provisioner and registering with a *different* DID must
-	// succeed, proving the claim was rolled back.
-	a.provisioner = &fakeProvisioner{}
+	a.provisioner = newMemoryProvisioner()
 	w = doRegister(t, a, registerBody(t, "john", otherDID()), "")
 	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201 after rollback, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 201 on retry after failure, got %d: %s", w.Code, w.Body.String())
 	}
 	if resp := decodeRegister(t, w); resp.Status != "created" {
-		t.Fatalf("expected status \"created\" after rollback, got %q", resp.Status)
+		t.Fatalf("expected status \"created\" on retry, got %q", resp.Status)
 	}
 }
 
