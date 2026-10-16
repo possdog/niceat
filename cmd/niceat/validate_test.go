@@ -75,6 +75,54 @@ func TestNormalizeHandle(t *testing.T) {
 	}
 }
 
+func TestParseDomain(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		// --- valid, canonicalized ---
+		{"simple", "wagg.ing", "wagg.ing", false},
+		{"uppercase normalized", "WAGG.ING", "wagg.ing", false},
+		{"padded", "  yeen.world  ", "yeen.world", false},
+		{"fqdn trailing dot", "wagg.ing.", "wagg.ing", false},
+		{"multi-label", "handles.wagg.ing", "handles.wagg.ing", false},
+		{"hyphenated label", "my-site.example.com", "my-site.example.com", false},
+
+		// --- invalid ---
+		{"empty", "", "", true},
+		{"whitespace only", "   ", "", true},
+		{"dot only", ".", "", true},
+		{"single label", "localhost", "", true},
+		{"empty label inside", "wagg..ing", "", true},
+		{"leading dot", ".wagg.ing", "", true},
+		{"leading hyphen label", "-wagg.ing", "", true},
+		{"trailing hyphen label", "wagg.ing-", "", true},
+		{"underscore", "wagg_ing.example.com", "", true},
+		{"space inside", "wagg ing.example.com", "", true},
+		{"non-ASCII", "wäg.ing", "", true},
+		{"too long", strings.Repeat("a", 250) + ".com", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseDomain(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseDomain(%q) = %q, expected error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseDomain(%q) unexpected error: %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseDomain(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateDID(t *testing.T) {
 	tests := []struct {
 		name    string

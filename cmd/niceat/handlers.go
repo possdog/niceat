@@ -5,7 +5,9 @@ import (
 	"errors"
 	"log"
 	"mime"
+	"net"
 	"net/http"
+	"strings"
 )
 
 // handleRegister handles POST /register.
@@ -21,12 +23,25 @@ import (
 //	405 — non-POST method (enforced by the mux's method-specific pattern)
 //	413 — request body exceeds maxRequestBody
 //	415 — Content-Type is not application/json
+//	421 — Host header does not match a domain this server manages
 //	500 — DNS provisioning failed
 //
 // Error bodies use the shared {"detail": "..."} shape; detail strings for 4xx
 // are written for display to the end user, while 5xx details stay generic so
 // internal errors are not leaked.
 func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
+	// --- 1. Resolve the target domain ---
+	// The Host header — not the request body — decides which managed
+	// domain the handle is registered under.  The frontend is served
+	// from the same origin it posts to, so a browser's Host is the
+	// domain the user is actually browsing.  A spoofed Host can only
+	// select among domains we already manage, never reach outside them,
+	// because resolveDomain only ever returns configured names.
+	domain, ok := a.resolveDomain(r.Host)
+	if !ok {
+		writeJSON(w, http.StatusMisdirectedRequest, errorResponse{Detail: "This host is not available for handle registration"})
+		return
+	}
 	// --- 1. Content-Type gate ---
 	// Registration is a JSON API; rejecting other types up front keeps
 	// form-encoded or multipart bodies from being silently misparsed.
@@ -63,9 +78,9 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- 4. Provision the DNS record ---
-	if err := a.provisioner.Provision(r.Context(), a.domain, label, did); err != nil {
+	if err := a.provisioner.Provision(r.Context(), domain, label, did); err != nil {
 		// Log the error server-side; the client gets a generic message.
-		log.Printf("ERROR: provisioning _atproto.%s.%s failed: %v", label, a.domain, err)
+		log.Printf("ERROR: provisioning _atproto.%s.%s failed: %v", label, domain, err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Detail: "Internal server error"})
 		return
 	}
@@ -73,8 +88,24 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// --- 5. Success ---
 	writeJSON(w, http.StatusCreated, registerResponse{
 		Status: "created",
-		Handle: label + "." + a.domain,
+		Handle: label + "." + domain,
 	})
+}
+
+// resolveDomain maps a request's Host header to a domain this instance
+// manages.  The Host may carry a port ("wagg.ing:8443") or an FQDN trailing
+// dot ("wagg.ing."); both are normalized away, as is case (DNS names are
+// case-insensitive).  An empty or unknown host resolves to nothing.
+func (a *app) resolveDomain(hostPort string) (string, bool) {
+	host := strings.ToLower(strings.TrimSpace(hostPort))
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(host, ".")
+	if a.domains[host] {
+		return host, true
+	}
+	return "", false
 }
 
 // writeJSON sets the JSON content type, writes the status code, and encodes v

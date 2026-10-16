@@ -2,8 +2,36 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// domainRegex matches a fully-qualified domain name composed of well-formed
+// DNS labels: 1-63 characters of [a-z0-9-] per label, none starting or
+// ending with a hyphen, at least two labels.  The multi-label requirement
+// excludes single-word pseudo-domains like "localhost" — a domain here must
+// be something Porkbun can actually manage.
+var domainRegex = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// parseDomain validates and canonicalizes a configured domain name.
+// Input is trimmed, lowercased, and stripped of a trailing FQDN dot; the
+// result must be a plain dotted domain of well-formed labels, at most 253
+// characters (the DNS name limit).  The returned error's message is meant
+// for the operator reading a startup log, not for end users.
+func parseDomain(raw string) (string, error) {
+	domain := strings.ToLower(strings.TrimSpace(raw))
+	domain = strings.TrimSuffix(domain, ".")
+	if domain == "" {
+		return "", fmt.Errorf("domain is required")
+	}
+	if len(domain) > 253 {
+		return "", fmt.Errorf("domain exceeds the 253-character DNS limit")
+	}
+	if !domainRegex.MatchString(domain) {
+		return "", fmt.Errorf("must be a dotted domain of DNS labels (letters, digits, hyphens)")
+	}
+	return domain, nil
+}
 
 // normalizeHandle validates and canonicalizes a requested handle label.
 //

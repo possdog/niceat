@@ -45,6 +45,9 @@ func (stubProvisioner) Provision(ctx context.Context, domain, label, did string)
 //   - Credentials come from porkbun_api_key.txt / porkbun_secret_key.txt in
 //     the working directory (both gitignored).  Current keys are sandbox:
 //     requests are simulated, so tests can hit the real client safely.
+//   - One key pair covers the whole Porkbun account, so the same client
+//     serves every managed domain; the {domain} in the endpoint path comes
+//     from the Host-resolved domain of the request, never from the client.
 //   - Endpoint: POST https://api.porkbun.com/api/json/v3/dns/create/{domain}
 //     with {"apikey", "secretapikey", "type":"TXT",
 //     "name":"_atproto.<label>", "content":"did=<did>", "ttl":"300"}.

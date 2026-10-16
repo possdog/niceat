@@ -2,8 +2,11 @@
 //
 // Serves one endpoint, POST /register, which takes a desired handle label
 // and a Bluesky account DID, and provisions the _atproto TXT record that
-// binds <label>.<domain> to the DID.  This lets communities share a domain
-// as Bluesky handles without each member needing to contact the owner.
+// binds <label>.<domain> to the DID.  One deployment can manage several
+// domains: the -domain flag is repeatable, and each request's Host header
+// selects which domain the handle is registered under.  This lets
+// communities share a domain as Bluesky handles without each member
+// needing to contact the owner.
 //
 // Current status: the HTTP layer and validation are complete; DNS
 // provisioning is a logging stub (see provision.go) until the Porkbun
@@ -19,28 +22,46 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
 
 func main() {
-	domain := flag.String("domain", "", "apex domain to serve handles under (required)")
+	var domains domainList
+	flag.Var(&domains, "domain", "apex domain to serve handles under; repeat the flag to manage multiple domains (at least one required)")
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	flag.Parse()
 
-	if *domain == "" {
-		log.Fatal("-domain is required (e.g. -domain example.com)")
+	if len(domains) == 0 {
+		log.Fatal("at least one -domain is required (e.g. -domain wagg.ing -domain yeen.world)")
+	}
+
+	// Validate and normalize every configured domain up front: a typo like
+	// "-domain wagg.ing, " must fail at startup, not on the first request.
+	managed := make(map[string]bool, len(domains))
+	for _, raw := range domains {
+		d, err := parseDomain(raw)
+		if err != nil {
+			log.Fatalf("invalid -domain %q: %v", raw, err)
+		}
+		managed[d] = true
 	}
 
 	// TODO(defense): wrap the mux with per-IP rate limiting before this is
 	// exposed publicly — see AGENTS.md "Planned defenses".
-	srv := &app{domain: *domain, provisioner: stubProvisioner{}}
+	srv := &app{domains: managed, provisioner: stubProvisioner{}}
 	log.Println("WARNING: stub provisioner active — registrations will be accepted but no DNS records are created")
 
 	mux := http.NewServeMux()
 	// Method-specific pattern: non-POST requests to /register get a 405
 	// from the mux without any handler code.
 	mux.HandleFunc("POST /register", srv.handleRegister)
+	// TODO(frontend): the form will be served from this same mux, on every
+	// managed domain.  It must be parameterized by the request Host — e.g.
+	// "get your handle under *@wagg.ing*" on wagg.ing, the equivalent for
+	// yeen.world on yeen.world — and post to the same origin, so the Host
+	// header carries the domain selection for /register too.
 
 	httpServer := &http.Server{Addr: *addr, Handler: mux}
 
@@ -48,7 +69,7 @@ func main() {
 	defer cancel()
 
 	go func() {
-		log.Printf("HTTP listening on %s", httpServer.Addr)
+		log.Printf("HTTP listening on %s, serving handles under %s", httpServer.Addr, domains)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("HTTP server error: %v", err)
 		}
@@ -64,4 +85,16 @@ func main() {
 		log.Printf("HTTP shutdown error: %v", err)
 	}
 	log.Println("server stopped")
+}
+
+// domainList collects repeated -domain flags via flag.Var.
+type domainList []string
+
+func (d *domainList) String() string {
+	return strings.Join(*d, ", ")
+}
+
+func (d *domainList) Set(v string) error {
+	*d = append(*d, v)
+	return nil
 }

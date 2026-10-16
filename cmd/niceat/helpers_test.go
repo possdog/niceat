@@ -32,16 +32,39 @@ func (f *fakeProvisioner) Provision(ctx context.Context, domain, label, did stri
 	return f.err
 }
 
-func newTestApp(p provisioner) *app {
-	return &app{domain: testDomain, provisioner: p}
+// newTestApp creates an app managing the given domains (parsed with the same
+// startup validation as main.go's -domain flag).  With no domains, the app
+// manages just testDomain.
+func newTestApp(t *testing.T, p provisioner, domains ...string) *app {
+	t.Helper()
+	if len(domains) == 0 {
+		domains = []string{testDomain}
+	}
+	managed := make(map[string]bool, len(domains))
+	for _, raw := range domains {
+		d, err := parseDomain(raw)
+		if err != nil {
+			t.Fatalf("test domain %q invalid: %v", raw, err)
+		}
+		managed[d] = true
+	}
+	return &app{domains: managed, provisioner: p}
 }
 
-// doRegister sends a POST /register request with the given body and
-// Content-Type, invoking the handler directly (no mux), and returns the
-// recorder.  contentType defaults to application/json when empty.
+// doRegister sends a POST /register request to the given Host with the given
+// body and Content-Type, invoking the handler directly (no mux), and
+// returns the recorder.  contentType defaults to application/json when
+// empty; host defaults to testDomain.
 func doRegister(t *testing.T, a *app, body, contentType string) *httptest.ResponseRecorder {
+	return doRegisterAt(t, a, testDomain, body, contentType)
+}
+
+// doRegisterAt is doRegister with an explicit Host header, to exercise the
+// per-domain routing.
+func doRegisterAt(t *testing.T, a *app, host, body, contentType string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+	req.Host = host
 	if contentType == "" {
 		contentType = "application/json"
 	}
@@ -58,6 +81,7 @@ func doRegisterMux(t *testing.T, a *app, method, target, body string) *httptest.
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /register", a.handleRegister)
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Host = testDomain
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)

@@ -81,9 +81,11 @@ var reservedLabels = map[string]bool{
 
 // app bundles the configuration and collaborators the handlers need.
 type app struct {
-	// domain is the apex domain this instance serves handles under, e.g.
-	// "example.com" — provisioned handles are <label>.<domain>.
-	domain string
+	// domains is the set of apex domains this instance manages, keyed by
+	// normalized lowercase name (parseDomain's output).  Each request's
+	// Host header selects which domain a handle is registered under, so a
+	// single deployment can serve *.wagg.ing, *.yeen.world, ... at once.
+	domains map[string]bool
 	// provisioner creates the DNS record that maps a handle to a DID.
 	// The real implementation (porkbun.go, not yet written) talks to the
 	// Porkbun API; tests use a fake.

@@ -22,7 +22,7 @@ func registerBody(t *testing.T, handle, did string) string {
 
 func TestHandleRegisterSuccess(t *testing.T) {
 	p := &fakeProvisioner{}
-	a := newTestApp(p)
+	a := newTestApp(t, p)
 	w := doRegister(t, a, registerBody(t, "John", validPLC), "")
 
 	if w.Code != http.StatusCreated {
@@ -49,7 +49,7 @@ func TestHandleRegisterSuccess(t *testing.T) {
 
 func TestHandleRegisterReserved(t *testing.T) {
 	p := &fakeProvisioner{}
-	a := newTestApp(p)
+	a := newTestApp(t, p)
 	w := doRegister(t, a, registerBody(t, "www", validPLC), "")
 
 	if w.Code != http.StatusBadRequest {
@@ -80,7 +80,7 @@ func TestHandleRegisterInvalidInputs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &fakeProvisioner{}
-			a := newTestApp(p)
+			a := newTestApp(t, p)
 			w := doRegister(t, a, registerBody(t, tt.handle, tt.did), "")
 
 			if w.Code != http.StatusBadRequest {
@@ -99,7 +99,7 @@ func TestHandleRegisterContentType(t *testing.T) {
 	// empty Content-Type to application/json.
 	missingReq := func(t *testing.T) *httptest.ResponseRecorder {
 		t.Helper()
-		a := newTestApp(&fakeProvisioner{})
+		a := newTestApp(t, &fakeProvisioner{})
 		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(registerBody(t, "john", validPLC)))
 		w := httptest.NewRecorder()
 		a.handleRegister(w, req)
@@ -126,7 +126,7 @@ func TestHandleRegisterContentType(t *testing.T) {
 				}
 				return
 			}
-			a := newTestApp(&fakeProvisioner{})
+			a := newTestApp(t, &fakeProvisioner{})
 			w := doRegister(t, a, registerBody(t, "john", validPLC), tt.contentType)
 			if w.Code != tt.want {
 				t.Fatalf("expected %d, got %d: %s", tt.want, w.Code, w.Body.String())
@@ -149,7 +149,7 @@ func TestHandleRegisterMalformedJSON(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &fakeProvisioner{}
-			a := newTestApp(p)
+			a := newTestApp(t, p)
 			w := doRegister(t, a, tt.body, "")
 
 			if w.Code != http.StatusBadRequest {
@@ -165,7 +165,7 @@ func TestHandleRegisterMalformedJSON(t *testing.T) {
 
 func TestHandleRegisterBodyTooLarge(t *testing.T) {
 	p := &fakeProvisioner{}
-	a := newTestApp(p)
+	a := newTestApp(t, p)
 	// 8 KiB of padding exceeds the 4 KiB request cap before the JSON is
 	// even complete.
 	body := `{"handle":"` + strings.Repeat("a", 8<<10) + `"}`
@@ -182,7 +182,7 @@ func TestHandleRegisterBodyTooLarge(t *testing.T) {
 
 func TestHandleRegisterProvisionerError(t *testing.T) {
 	p := &fakeProvisioner{err: errors.New("porkbun is down")}
-	a := newTestApp(p)
+	a := newTestApp(t, p)
 	w := doRegister(t, a, registerBody(t, "john", validPLC), "")
 
 	if w.Code != http.StatusInternalServerError {
@@ -197,8 +197,108 @@ func TestHandleRegisterProvisionerError(t *testing.T) {
 	}
 }
 
+func TestResolveDomain(t *testing.T) {
+	a := newTestApp(t, &fakeProvisioner{}, "wagg.ing", "Yeen.World")
+
+	tests := []struct {
+		host string
+		want string
+		ok   bool
+	}{
+		{"wagg.ing", "wagg.ing", true},
+		{"yeen.world", "yeen.world", true},
+		{"WAGG.ING", "wagg.ing", true},       // DNS names are case-insensitive
+		{"wagg.ing:8443", "wagg.ing", true},  // Host header may carry a port
+		{"wagg.ing.", "wagg.ing", true},      // FQDN trailing dot
+		{" wagg.ing ", "wagg.ing", true},     // padded
+		{"handles.wagg.ing", "", false},      // subdomain, not a managed domain
+		{"evil.example", "", false},          // not ours
+		{"", "", false},                      // no Host at all
+		{"wagg.ing.evil.example", "", false}, // suffix trick
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			got, ok := a.resolveDomain(tt.host)
+			if ok != tt.ok {
+				t.Fatalf("resolveDomain(%q) ok = %v (got %q), want ok = %v", tt.host, ok, got, tt.ok)
+			}
+			if ok && got != tt.want {
+				t.Fatalf("resolveDomain(%q) = %q, want %q", tt.host, got, tt.want)
+			}
+			if !ok && got != "" {
+				t.Fatalf("resolveDomain(%q) miss must return empty domain, got %q", tt.host, got)
+			}
+		})
+	}
+}
+
+func TestHandleRegisterHostSelection(t *testing.T) {
+	tests := []struct {
+		name       string
+		host       string
+		wantHandle string
+	}{
+		{"first managed domain", "wagg.ing", "john.wagg.ing"},
+		{"second managed domain", "yeen.world", "john.yeen.world"},
+		{"case-insensitive host", "Wagg.Ing", "john.wagg.ing"},
+		{"host with port", "wagg.ing:8443", "john.wagg.ing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &fakeProvisioner{}
+			a := newTestApp(t, p, "wagg.ing", "yeen.world")
+			w := doRegisterAt(t, a, tt.host, registerBody(t, "john", validPLC), "")
+
+			if w.Code != http.StatusCreated {
+				t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+			}
+			resp := decodeRegister(t, w)
+			if resp.Handle != tt.wantHandle {
+				t.Fatalf("expected handle %q, got %q", tt.wantHandle, resp.Handle)
+			}
+			if len(p.calls) != 1 {
+				t.Fatalf("expected 1 provisioner call, got %d", len(p.calls))
+			}
+			// The provisioner must receive the Host-resolved domain, so
+			// the Porkbun client operates on the matching zone.
+			if p.calls[0].domain != tt.host && p.calls[0].domain != strings.ToLower(strings.Split(tt.host, ":")[0]) {
+				t.Fatalf("provisioner called with domain %q, expected %q", p.calls[0].domain, tt.host)
+			}
+			if p.calls[0].label != "john" || p.calls[0].did != validPLC {
+				t.Fatalf("unexpected provisioner call: %+v", p.calls[0])
+			}
+		})
+	}
+}
+
+func TestHandleRegisterUnknownHost(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+	}{
+		{"foreign domain", "evil.example"},
+		{"subdomain of managed domain", "handles.wagg.ing"},
+		{"empty host", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &fakeProvisioner{}
+			a := newTestApp(t, p, "wagg.ing", "yeen.world")
+			w := doRegisterAt(t, a, tt.host, registerBody(t, "john", validPLC), "")
+
+			if w.Code != http.StatusMisdirectedRequest {
+				t.Fatalf("expected 421, got %d: %s", w.Code, w.Body.String())
+			}
+			decodeDetail(t, w)
+			if len(p.calls) != 0 {
+				t.Fatalf("provisioner must not be called for unknown host, got %+v", p.calls)
+			}
+		})
+	}
+}
+
 func TestRegisterRouting(t *testing.T) {
-	a := newTestApp(&fakeProvisioner{})
+	a := newTestApp(t, &fakeProvisioner{})
 
 	tests := []struct {
 		name   string

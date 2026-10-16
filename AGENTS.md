@@ -12,13 +12,14 @@ standard library only, one package at `cmd/niceat/`.
 
 ```bash
 go build -o niceat ./cmd/niceat
-./niceat -domain example.com -addr :8080
+./niceat -domain wagg.ing -domain yeen.world -addr :8080
 ```
 
-`-domain` (apex domain served) is required; the binary refuses to start
-without it.  `porkbun_api_key.txt` / `porkbun_secret_key.txt` in the working
-directory hold the sandbox Porkbun credentials (gitignored; never commit,
-never hard-code them into source or logs).
+`-domain` is repeatable; at least one is required and the binary refuses to
+start without it.  Each domain is validated/normalized (lowercased, FQDN dot
+stripped) at startup.  `porkbun_api_key.txt` / `porkbun_secret_key.txt` in
+the working directory hold the sandbox Porkbun credentials (gitignored;
+never commit, never hard-code them into source or logs).
 
 The DNS backend is currently `stubProvisioner`: it logs what it would create
 and returns success, so requests "work" end-to-end but no DNS record exists.
@@ -31,9 +32,20 @@ Single endpoint:
 - **POST /register** — JSON `{"handle": "<label>", "did": "did:plc:..."}`.
   Returns `201 {"status":"created","handle":"<label>.<domain>"}`.
 
+**Domain selection is by Host header, not request body.**  One deployment
+manages several domains; the request's Host (lowercased, port and FQDN dot
+stripped) must be one of the configured `-domain` values, and the handle is
+registered under that domain.  The request body never carries a domain — the
+frontend posts same-origin, so the browser's Host is the domain the user is
+browsing, and a spoofed Host can only select among domains we already
+manage.  A reverse proxy in front must therefore forward the original Host
+(or rewrite it to the correct domain); do not honor client-supplied
+`X-Forwarded-Host`.
+
 Status codes: 201 created; 400 invalid handle/DID or malformed JSON; 405
 non-POST (from the mux's `POST /register` pattern); 413 body over 4 KiB;
-415 Content-Type not `application/json`; 500 provisioning failure.
+415 Content-Type not `application/json`; 421 Host not a managed domain;
+500 provisioning failure.
 
 Validation (in `validate.go`, all error messages user-displayable):
 
@@ -53,18 +65,28 @@ Validation (in `validate.go`, all error messages user-displayable):
 
 ```
 cmd/niceat/
-├── main.go        — flags (-domain, -addr), mux, graceful shutdown
-├── app.go         — app struct, regexes, reservedLabels, JSON types
-├── handlers.go    — handleRegister + writeJSON
-├── validate.go    — normalizeHandle, validateDID
+├── main.go        — repeatable -domain flag, domain startup validation, mux, graceful shutdown
+├── app.go         — app struct (managed-domain set), regexes, reservedLabels, JSON types
+├── handlers.go    — resolveDomain, handleRegister + writeJSON
+├── validate.go    — parseDomain, normalizeHandle, validateDID
 ├── provision.go   — provisioner interface, stubProvisioner, Porkbun notes
 └── *_test.go      — tests alongside source, fakeProvisioner in helpers_test.go
 ```
 
 The handler only sees the `provisioner` interface
 (`Provision(ctx, domain, label, did)`), so `porkbun.go` can be added without
-touching the HTTP layer; tests use `fakeProvisioner`.  Porkbun endpoint
-details and credential handling are recorded as comments in `provision.go`.
+touching the HTTP layer; the domain argument is the Host-resolved zone, so
+the Porkbun client automatically operates on the matching domain.  Tests use
+`fakeProvisioner`.  Porkbun endpoint details and credential handling are
+recorded as comments in `provision.go`.
+
+## Planned frontend (not yet built)
+
+The form will be served from the same mux on every managed domain, and its
+markup must be parameterized by the request Host — "get your handle under
+*@wagg.ing*" on wagg.ing, the equivalent on yeen.world — posting the form
+same-origin so the Host header carries the domain selection.  See the
+TODO(frontend) note in main.go.
 
 ## Planned defenses (designed for, deliberately NOT yet implemented)
 
