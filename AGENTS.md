@@ -10,16 +10,34 @@ standard library only, one package at `cmd/niceat/`.
 
 ## Build & run
 
-```bash
-go build -o niceat ./cmd/niceat
-./niceat -domain wagg.ing -domain yeen.world -addr :8080
+Configuration lives in a JSON file (JSON because the standard library
+parses it natively; a persistent service should not depend on CLI flags to
+remember its setup).  The path defaults to `niceat.json` in the working
+directory; the file is instance-specific and gitignored:
+
+```json
+{
+  "domains": ["wagg.ing", "yeen.world"],
+  "addr": ":8080"
+}
 ```
 
-`-domain` is repeatable; at least one is required and the binary refuses to
-start without it.  Each domain is validated/normalized (lowercased, FQDN dot
-stripped) at startup.  `porkbun_api_key.txt` / `porkbun_secret_key.txt` in
-the working directory hold the sandbox Porkbun credentials (gitignored;
-never commit, never hard-code them into source or logs).
+- `domains` (required, non-empty): apex domains managed by this instance.
+  Entries are validated and normalized at startup (lowercased, FQDN dot
+  stripped, duplicates removed) — a bad entry is a startup error naming the
+  offending value.
+- `addr` (optional): HTTP listen address, defaults to `:8080`.
+- Unknown fields are rejected (`DisallowUnknownFields`), so a typo like
+  `"domain"` fails loudly instead of silently yielding an empty domain set.
+
+```bash
+go build -o niceat ./cmd/niceat
+./niceat -config niceat.json
+```
+
+`porkbun_api_key.txt` / `porkbun_secret_key.txt` in the working directory
+hold the sandbox Porkbun credentials (gitignored; never commit, never
+hard-code them into source or logs).
 
 The DNS backend is currently `stubProvisioner`: it logs what it would create
 and returns success, so requests "work" end-to-end but no DNS record exists.
@@ -65,7 +83,8 @@ Validation (in `validate.go`, all error messages user-displayable):
 
 ```
 cmd/niceat/
-├── main.go        — repeatable -domain flag, domain startup validation, mux, graceful shutdown
+├── main.go        — -config flag, mux, graceful shutdown
+├── config.go      — JSON config type, strict loadConfig, managedSet
 ├── app.go         — app struct (managed-domain set), regexes, reservedLabels, JSON types
 ├── handlers.go    — resolveDomain, handleRegister + writeJSON
 ├── validate.go    — parseDomain, normalizeHandle, validateDID

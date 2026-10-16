@@ -28,29 +28,17 @@ import (
 )
 
 func main() {
-	var domains domainList
-	flag.Var(&domains, "domain", "apex domain to serve handles under; repeat the flag to manage multiple domains (at least one required)")
-	addr := flag.String("addr", ":8080", "HTTP listen address")
+	configPath := flag.String("config", defaultConfigPath, "path to the JSON config file")
 	flag.Parse()
 
-	if len(domains) == 0 {
-		log.Fatal("at least one -domain is required (e.g. -domain wagg.ing -domain yeen.world)")
-	}
-
-	// Validate and normalize every configured domain up front: a typo like
-	// "-domain wagg.ing, " must fail at startup, not on the first request.
-	managed := make(map[string]bool, len(domains))
-	for _, raw := range domains {
-		d, err := parseDomain(raw)
-		if err != nil {
-			log.Fatalf("invalid -domain %q: %v", raw, err)
-		}
-		managed[d] = true
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("loading config: %v", err)
 	}
 
 	// TODO(defense): wrap the mux with per-IP rate limiting before this is
 	// exposed publicly — see AGENTS.md "Planned defenses".
-	srv := &app{domains: managed, provisioner: stubProvisioner{}}
+	srv := &app{domains: cfg.managedSet(), provisioner: stubProvisioner{}}
 	log.Println("WARNING: stub provisioner active — registrations will be accepted but no DNS records are created")
 
 	mux := http.NewServeMux()
@@ -63,13 +51,13 @@ func main() {
 	// yeen.world on yeen.world — and post to the same origin, so the Host
 	// header carries the domain selection for /register too.
 
-	httpServer := &http.Server{Addr: *addr, Handler: mux}
+	httpServer := &http.Server{Addr: cfg.Addr, Handler: mux}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	go func() {
-		log.Printf("HTTP listening on %s, serving handles under %s", httpServer.Addr, domains)
+		log.Printf("HTTP listening on %s, serving handles under %s", cfg.Addr, strings.Join(cfg.Domains, ", "))
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("HTTP server error: %v", err)
 		}
@@ -85,16 +73,4 @@ func main() {
 		log.Printf("HTTP shutdown error: %v", err)
 	}
 	log.Println("server stopped")
-}
-
-// domainList collects repeated -domain flags via flag.Var.
-type domainList []string
-
-func (d *domainList) String() string {
-	return strings.Join(*d, ", ")
-}
-
-func (d *domainList) Set(v string) error {
-	*d = append(*d, v)
-	return nil
 }
