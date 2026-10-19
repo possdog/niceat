@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 )
 
@@ -22,6 +23,11 @@ const (
 	// holds multiple records for it (which the atproto spec treats as an
 	// invalid handle).  The request must be refused.
 	outcomeConflict
+	// outcomeDIDLimit: the label itself is free, but this DID already
+	// holds another handle under the same domain.  niceat enforces one
+	// handle per DID per domain (see handlers.go) and the request must be
+	// refused as a policy matter.
+	outcomeDIDLimit
 )
 
 // provisioner is the DNS backend: it publishes the record that binds a handle
@@ -68,6 +74,12 @@ func (m *memoryProvisioner) Provision(_ context.Context, domain, label, did stri
 			return outcomeRegistered, nil
 		}
 		return outcomeConflict, nil
+	}
+	// One handle per DID per domain, mirroring the Porkbun client's cap.
+	for k, d := range m.records {
+		if d == did && strings.HasPrefix(k, domain+"\x00") {
+			return outcomeDIDLimit, nil
+		}
 	}
 	m.records[key] = did
 	log.Printf("STUB: would create TXT _atproto.%s.%s -> \"did=%s\"", label, domain, did)

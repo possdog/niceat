@@ -23,7 +23,8 @@ import (
 //	200 — idempotent repeat: the handle is already bound to this DID
 //	400 — invalid handle or DID (including reserved names), malformed JSON
 //	405 — non-POST method (enforced by the mux's method-specific pattern)
-//	409 — handle already claimed by a different DID
+//	409 — handle already claimed by a different DID, or this DID already
+//	       holds another handle under the served domain (one per domain)
 //	413 — request body exceeds maxRequestBody
 //	415 — Content-Type is not application/json
 //	421 — Host header does not match a domain this server manages
@@ -110,6 +111,12 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, errorResponse{Detail: fmt.Sprintf("handle %q is not available", label)})
 		return
 	}
+	if outcome == outcomeDIDLimit {
+		// One handle per DID per domain; the requester already has one
+		// under this community.
+		writeJSON(w, http.StatusConflict, errorResponse{Detail: "You already have a handle under " + domain})
+		return
+	}
 
 	// --- 6. Success ---
 	// 201 for a fresh registration, 200 for an idempotent repeat by the
@@ -120,6 +127,11 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 		status = "registered"
 		code = http.StatusOK
 	}
+	// Audit trail: one line per successful registration, for dispute
+	// resolution and reaper debugging — the zone alone cannot answer
+	// "who asked for this".  Label and DID are charset-validated, so the
+	// line cannot be log-injected.
+	log.Printf("AUDIT: %s %s -> %s (client %s)", status, label+"."+domain, did, clientIP(r))
 	writeJSON(w, code, registerResponse{
 		Status: status,
 		Handle: label + "." + domain,

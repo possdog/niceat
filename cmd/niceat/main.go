@@ -75,7 +75,20 @@ func main() {
 	// Per-IP rate limiting wraps everything; see ratelimit.go.
 	rl := newRateLimiter()
 
-	httpServer := &http.Server{Addr: cfg.Addr, Handler: rl.middleware(mux)}
+	httpServer := &http.Server{
+		Addr:    cfg.Addr,
+		Handler: rl.middleware(mux),
+		// Timeouts cap how long any single client can hold a
+		// connection, so slow or stalled clients (slowloris) cannot
+		// pin file descriptors indefinitely.  Every response this
+		// service produces is small and immediate, so generous bounds
+		// cost legitimate clients nothing.  IdleTimeout bounds
+		// keep-alive reuse once the frontend serves static content.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

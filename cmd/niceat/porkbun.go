@@ -56,6 +56,13 @@ var errDuplicateRecord = errors.New("porkbun: duplicate record")
 // The check-then-create race between two concurrent requests for the same
 // label is closed by the handler's per-label lock (app.go); this client is
 // safe to use under it.
+//
+// Credential scoping: production keys will be scoped per domain (dns scope,
+// allowed-domain allowlist), so this client will be expected to select and
+// forward a unique key pair per managed domain.  Provision already receives
+// the Host-resolved domain, so the change is contained here and in the
+// credential loading — the handler and the create/retrieve flows stay as
+// they are.
 type porkbunProvisioner struct {
 	apiKey    string
 	secretKey string
@@ -162,23 +169,44 @@ func (p *porkbunProvisioner) call(ctx context.Context, path string, body map[str
 	return env, nil
 }
 
-// Provision implements the provisioner interface: look up the existing
-// _atproto record for the label, then create it if — and only if — absent.
+// Provision implements the provisioner interface: list the zone, refuse if
+// the label is taken or this DID already holds a handle under the domain,
+// and create the record if — and only if — both are clear.
+//
+// A single zone listing serves both checks (whether the label's record
+// exists, and how many handles this DID holds).  Zones are small — Porkbun
+// caps them at 2,500 records — and registration is rate-limited, so one
+// full list per registration is proportionate.
 //
 // For a label "john" it manages the TXT record _atproto.john.<domain>,
 // exactly the name Bluesky's handle resolver queries for john.<domain>.
 func (p *porkbunProvisioner) Provision(ctx context.Context, domain, label, did string) (provisionOutcome, error) {
-	name := "_atproto." + label
+	fqdn := "_atproto." + label + "." + domain
 
-	env, err := p.call(ctx, "/dns/retrieveByNameType/"+domain+"/TXT/"+name, map[string]string{})
+	env, err := p.call(ctx, "/dns/retrieve/"+domain, map[string]string{})
 	if err != nil {
-		return 0, fmt.Errorf("checking existing records: %w", err)
+		return 0, fmt.Errorf("listing zone records: %w", err)
 	}
-	switch len(env.Records) {
+
+	var labelRecords []pbRecord
+	didHandles := 0
+	for _, r := range env.Records {
+		if r.Type != "TXT" || !strings.HasPrefix(r.Name, "_atproto.") {
+			continue
+		}
+		if r.Name == fqdn {
+			labelRecords = append(labelRecords, r)
+		}
+		if r.Content == "did="+did {
+			didHandles++
+		}
+	}
+
+	switch len(labelRecords) {
 	case 0:
-		// No record: the label is free; fall through to create.
+		// No record: the label is free so far.
 	case 1:
-		if env.Records[0].Content == "did="+did {
+		if labelRecords[0].Content == "did="+did {
 			return outcomeRegistered, nil
 		}
 		// The label is bound to a different DID.
@@ -190,9 +218,18 @@ func (p *porkbunProvisioner) Provision(ctx context.Context, domain, label, did s
 		return outcomeConflict, nil
 	}
 
+	// One handle per DID per domain: each DID gets a single label under
+	// each community, which multiplies the cost of squatting (a fresh
+	// Bluesky account per handle) and keeps the "one handle per person"
+	// product shape enforceable.  The count runs after the label lookup,
+	// so re-submitting one's own handle stays an idempotent 200.
+	if didHandles > 0 {
+		return outcomeDIDLimit, nil
+	}
+
 	env, err = p.call(ctx, "/dns/create/"+domain, map[string]string{
 		"type":    "TXT",
-		"name":    name,
+		"name":    "_atproto." + label,
 		"content": "did=" + did,
 		"ttl":     porkbunRecordTTL,
 	})

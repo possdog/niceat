@@ -263,6 +263,25 @@ func TestHandleRegisterProvisionerConflict(t *testing.T) {
 	}
 }
 
+func TestHandleRegisterDIDLimit(t *testing.T) {
+	// A provisioner reporting outcomeDIDLimit must surface as 409 with
+	// the one-handle-per-domain wording, distinct from the "not available"
+	// refusal so the requester knows the label itself is free.
+	p := &fakeProvisioner{outcome: outcomeDIDLimit}
+	a := newTestApp(t, p)
+	w := doRegister(t, a, registerBody(t, "john", validPLC), "")
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if d := decodeDetail(t, w); !strings.Contains(d, "already have a handle under "+testDomain) {
+		t.Fatalf("expected per-domain limit detail, got %q", d)
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("expected 1 provisioner call, got %d", len(p.calls))
+	}
+}
+
 func TestHandleRegisterProvisionerErrorIsRetryable(t *testing.T) {
 	// A failed registration must leave nothing behind (DNS-as-truth has no
 	// separate claim to roll back): swapping in a working provisioner and

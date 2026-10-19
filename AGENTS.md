@@ -78,7 +78,9 @@ manage.  A reverse proxy in front must therefore forward the original Host
 Status codes: 201 created; 200 idempotent repeat (handle already bound to
 this DID); 400 invalid handle/DID or malformed JSON; 405 non-POST (from the
 mux's `POST /register` pattern); 409 handle claimed by a different DID
-(worded identically to the reserved-name refusal, so probers learn nothing);
+(worded identically to the reserved-name refusal, so probers learn nothing)
+or this DID already holds another handle under the served domain (one handle
+per DID per domain);
 413 body over 4 KiB; 415 Content-Type not `application/json`; 421 Host not a
 managed domain; 429 per-IP rate limit exceeded; 500 provisioning failure
 (generic detail; backend errors are logged, not leaked).
@@ -130,7 +132,7 @@ cmd/niceat/
 ├── validate.go    — parseDomain, normalizeHandle, validateDID
 ├── ratelimit.go   — per-IP token bucket middleware
 ├── provision.go   — provisioner interface + outcomes, memoryProvisioner
-├── porkbun.go     — Porkbun client: retrieveByNameType + create
+├── porkbun.go     — Porkbun client: zone listing, per-DID cap, create
 └── *_test.go      — tests alongside source, fakes in helpers_test.go / porkbun_test.go
 ```
 
@@ -143,12 +145,15 @@ The handler only sees the `provisioner` interface
 backend is swappable without touching the HTTP layer; the domain argument is
 the Host-resolved zone, so the Porkbun client automatically operates on the
 matching domain.  The outcome (created / registered / conflict) maps to
-201/200/409 respectively.  `porkbun.go` implements the real client —
-retrieveByNameType for the existence check, create only when absent, with
-sandbox-verified semantics (an exact-duplicate create is 400
-`DUPLICATE_RECORD` with `existingId`; a same-name/different-content create
-would stack a second TXT record and break the handle, hence the pre-check).
-Tests use `fakeProvisioner` (handler) and `fakePorkbunServer` (client).
+201/200/409 respectively.  `porkbun.go` implements the real client — one
+`/dns/retrieve/{domain}` zone listing serves both the existence check and
+the per-DID cap count (see Defenses), create only when the label is absent
+and the DID is under the cap, with sandbox-verified semantics (an
+exact-duplicate create is 400 `DUPLICATE_RECORD` with `existingId`; a
+same-name/different-content create would stack a second TXT record and
+break the handle, hence the pre-check).  Registration is therefore two
+Porkbun calls (list + create), not one.  Tests use `fakeProvisioner`
+(handler) and `fakePorkbunServer` (client).
 
 Because registration is a check-then-create over two Porkbun calls, the
 handler serializes it per (domain, label) with `labelLocks` (app.go): two
@@ -182,6 +187,24 @@ TODO(frontend) note in main.go.
   entries.  `X-Real-IP` is never trusted.  Idle IPs are evicted after an
   hour (sweep above a 10 000-entry threshold) to bound memory under
   IP-spray abuse.
+- **Per-DID handle cap** (`porkbun.go`, `provision.go`) — one handle per DID
+  per domain: the same zone listing that checks label availability also
+  counts the DID's existing `_atproto` records in that zone; a second label
+  for the same DID is refused with 409 ("You already have a handle under
+  <domain>").  The count runs after the label lookup, so re-submitting
+  one's own handle stays an idempotent 200.  Rationale: the cap multiplies
+  squatting cost (one DID can hold N labels) and keeps the natural
+  one-handle-per-person shape; it is per-domain, so the same DID can claim
+  one label under each managed domain.
+- **Audit logging** (`handlers.go`) — every successful registration logs
+  `AUDIT: <status> <handle> -> <did> (client <ip>)`.  There is no local
+  ledger by design, so this line is the only record of who took what when —
+  useful for dispute resolution and for debugging the future reaper.
+  Handle and DID are charset-validated before this point, so the log line
+  cannot be forged via newline injection.
+- **Server timeouts** (`main.go`) — ReadHeaderTimeout 10s, ReadTimeout 30s,
+  WriteTimeout 30s, IdleTimeout 2m on the `http.Server`, so a slowloris
+  client cannot pin connections open indefinitely.
 - **Handle reaper** — deliberately NOT yet implemented.  The account is the
   authority, not DNS, so DID ownership is not verified at registration;
   instead a slow background task will iterate the DNS records, resolve
@@ -191,6 +214,18 @@ TODO(frontend) note in main.go.
   It needs a grace period: users necessarily set their username in-app
   *after* the DNS record exists, or the bidirectional link could never be
   established.  This is the main remaining gap before public exposure.
+
+## Deployment notes (not code)
+
+- **Porkbun keys will be scoped per domain** in production (dns scope,
+  allowed-domain allowlist).  The backend must therefore load and forward a
+  unique key pair per domain — `Provision` already receives the domain, so
+  the change is contained in `porkbun.go` plus credential loading; see the
+  struct comment in `porkbun.go`.
+- **TLS terminates at Caddy**, which proxies to the service over localhost —
+  matching `isTrustedProxy` (trusted proxy = localhost), so
+  `X-Forwarded-For` handling works as written.  Caddy must forward the
+  original Host header, since domain selection depends on it.
 
 ## Testing / linting
 
