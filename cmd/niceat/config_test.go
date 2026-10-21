@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeConfig writes content to a temp config file and returns its path.
@@ -130,5 +131,77 @@ func TestManagedSet(t *testing.T) {
 	set := cfg.managedSet()
 	if len(set) != 2 || !set["wagg.ing"] || !set["yeen.world"] {
 		t.Fatalf("managedSet = %v, want {wagg.ing, yeen.world}", set)
+	}
+}
+
+func TestLoadConfigReaper(t *testing.T) {
+	tests := []struct {
+		name         string
+		content      string
+		wantEnabled  bool
+		wantInterval time.Duration
+		wantGrace    time.Duration
+		wantErr      string
+	}{
+		{
+			name:         "section absent: defaults (enabled, 6h, 30d)",
+			content:      `{"domains": ["wagg.ing"]}`,
+			wantEnabled:  true,
+			wantInterval: defaultReaperInterval,
+			wantGrace:    defaultReaperGrace,
+		},
+		{
+			name:         "explicit settings",
+			content:      `{"domains": ["wagg.ing"], "reaper": {"enabled": true, "interval": "1h", "grace": "48h"}}`,
+			wantEnabled:  true,
+			wantInterval: time.Hour,
+			wantGrace:    48 * time.Hour,
+		},
+		{
+			name:         "disabled",
+			content:      `{"domains": ["wagg.ing"], "reaper": {"enabled": false}}`,
+			wantEnabled:  false,
+			wantInterval: defaultReaperInterval,
+			wantGrace:    defaultReaperGrace,
+		},
+		{
+			name:    "bad interval",
+			content: `{"domains": ["wagg.ing"], "reaper": {"interval": "tomorrow"}}`,
+			wantErr: "reaper.interval",
+		},
+		{
+			name:    "negative grace",
+			content: `{"domains": ["wagg.ing"], "reaper": {"grace": "-1h"}}`,
+			wantErr: "reaper.grace",
+		},
+		{
+			// Strict decoding applies inside the section too.
+			name:    "unknown field in section",
+			content: `{"domains": ["wagg.ing"], "reaper": {"intervalle": "1h"}}`,
+			wantErr: "unknown field",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := loadConfig(writeConfig(t, tt.content))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+			if cfg.reaperEnabled != tt.wantEnabled {
+				t.Errorf("reaperEnabled = %v, want %v", cfg.reaperEnabled, tt.wantEnabled)
+			}
+			if cfg.reaperInterval != tt.wantInterval {
+				t.Errorf("reaperInterval = %v, want %v", cfg.reaperInterval, tt.wantInterval)
+			}
+			if cfg.reaperGrace != tt.wantGrace {
+				t.Errorf("reaperGrace = %v, want %v", cfg.reaperGrace, tt.wantGrace)
+			}
+		})
 	}
 }

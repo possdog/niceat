@@ -39,7 +39,9 @@ var errDuplicateRecord = errors.New("porkbun: duplicate record")
 // porkbunProvisioner provisions _atproto TXT records through the Porkbun
 // DNS API.  DNS is the claim store — there is deliberately no local ledger:
 // the existence and content of the TXT record are the single source of
-// truth, so nothing can desync (not the planned reaper, not manual edits
+// truth, so nothing can desync (not the reaper's grace-clock file, which
+// only affects when a record is deleted and never who owns it, not manual
+// edits
 // in the Porkbun dashboard, not zone restores).
 //
 // Sandbox-verified semantics this implementation relies on:
@@ -245,4 +247,77 @@ func (p *porkbunProvisioner) Provision(ctx context.Context, domain, label, did s
 		return 0, fmt.Errorf("creating record: %w", err)
 	}
 	return outcomeCreated, nil
+}
+
+// atprotoLabel extracts the handle label from a record name like
+// _atproto.john.example.com in the zone example.com.  A name that is not a
+// plain "_atproto.<label>.<domain>" (no FQDN dot, single label) is not a
+// record niceat manages — e.g. a dashboard-created multi-level name — and is
+// reported as such so callers skip it.
+func atprotoLabel(name, domain string) (string, bool) {
+	name = strings.TrimSuffix(name, ".")
+	rest, ok := strings.CutPrefix(name, "_atproto.")
+	if !ok {
+		return "", false
+	}
+	label, ok := strings.CutSuffix(rest, "."+domain)
+	if !ok || label == "" || strings.Contains(label, ".") {
+		return "", false
+	}
+	return label, true
+}
+
+// atprotoRecord is one _atproto TXT record as the reaper sees it: where it
+// lives, and which account it binds the handle to.
+type atprotoRecord struct {
+	// ID is Porkbun's record id, unique per zone record.  The reaper keys
+	// its grace-period state on this, so a re-registered label (fresh
+	// record, fresh id) starts a fresh grace clock automatically.
+	ID string
+	// Label is the handle's subdomain label (e.g. "john").
+	Label string
+	// DID is the record's value (the account the handle points at).
+	DID string
+}
+
+// listAtproto returns every _atproto TXT record in the zone, parsed into
+// label + DID pairs with Porkbun record ids attached.  The reaper is the
+// only caller: it needs the full population of handle records to judge
+// which are stale.  Non-_atproto records, foreign content, and
+// non-niceat-shaped names are skipped.
+func (p *porkbunProvisioner) listAtproto(ctx context.Context, domain string) ([]atprotoRecord, error) {
+	env, err := p.call(ctx, "/dns/retrieve/"+domain, map[string]string{})
+	if err != nil {
+		return nil, fmt.Errorf("listing zone records: %w", err)
+	}
+	var out []atprotoRecord
+	for _, r := range env.Records {
+		if r.Type != "TXT" {
+			continue
+		}
+		label, ok := atprotoLabel(r.Name, domain)
+		if !ok {
+			continue
+		}
+		did, ok := strings.CutPrefix(r.Content, "did=")
+		if !ok {
+			// A TXT record on an _atproto name without a did= value
+			// is foreign; the reaper only judges its own records.
+			continue
+		}
+		out = append(out, atprotoRecord{ID: r.ID, Label: label, DID: did})
+	}
+	return out, nil
+}
+
+// deleteRecord removes the record with the given Porkbun id from the zone.
+// The reaper deletes by id — never by name — so a record that was replaced
+// between the reaper's listing and this call is either already gone
+// (harmless Porkbun error) or is a different record whose owner it did not
+// judge.
+func (p *porkbunProvisioner) deleteRecord(ctx context.Context, domain, id string) error {
+	if _, err := p.call(ctx, "/dns/delete/"+domain+"/"+id, map[string]string{}); err != nil {
+		return fmt.Errorf("deleting record %s: %w", id, err)
+	}
+	return nil
 }

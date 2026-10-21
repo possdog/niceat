@@ -91,8 +91,9 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// --- 5. Provision (DNS is the claim store) ---
 	// The existence and content of the _atproto TXT record are the single
 	// source of truth for whether a handle is taken and by whom — there is
-	// deliberately no local ledger to desync with the future reaper or
-	// manual Porkbun edits.  The check-then-create flow runs under a
+	// deliberately no local ledger to desync with the reaper (whose state
+	// file is a timing cache, not a claim ledger), manual Porkbun edits,
+	// or zone restores.  The check-then-create flow runs under a
 	// per-label lock so two concurrent requests for the same label cannot
 	// both pass the "no record" check and stack two records.
 	unlock := a.locks.acquire(domain, label)

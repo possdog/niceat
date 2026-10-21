@@ -60,6 +60,20 @@ func main() {
 		log.Println("WARNING: no Porkbun credentials found — running the in-memory provisioner; registrations are accepted but no DNS records are created")
 	}
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// The handle reaper frees labels whose accounts no longer use them.
+	// It needs the real DNS backend (the in-memory one publishes
+	// nothing to sweep) and runs until shutdown; see reaper.go.
+	if haveCreds && cfg.reaperEnabled {
+		rep := newReaper(cfg.Domains, backend.(*porkbunProvisioner), newPlcDirectory(""), reaperStateFile, cfg.reaperGrace)
+		go rep.run(ctx, cfg.reaperInterval)
+		log.Printf("handle reaper enabled: interval %s, grace %s", cfg.reaperInterval, cfg.reaperGrace)
+	} else if !haveCreds && cfg.reaperEnabled {
+		log.Println("WARNING: handle reaper disabled — no Porkbun credentials to sweep")
+	}
+
 	srv := &app{domains: cfg.managedSet(), provisioner: backend}
 
 	mux := srv.newMux(newRateLimiter())
@@ -78,9 +92,6 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	go func() {
 		log.Printf("HTTP listening on %s, serving handles under %s", cfg.Addr, strings.Join(cfg.Domains, ", "))

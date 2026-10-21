@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,11 +19,18 @@ func fqdn(domain, label string) string {
 	return "_atproto." + label + "." + domain
 }
 
+// fakeRecordID mirrors the real API's per-record ids: unique per record.
+// The reaper keys its grace state on these, so the fake must not reuse one
+// across records.
+func fakeRecordID(name string, index int) string {
+	return fmt.Sprintf("%s:%d", name, index)
+}
+
 // fakePorkbunServer is a minimal Porkbun API stand-in behind an httptest
-// server, implementing exactly the two endpoints porkbunProvisioner uses
-// (zone listing and record create), with the semantics verified against
-// the real sandbox: exact-duplicate creates are rejected, everything else
-// stacks.
+// server, implementing exactly the endpoints porkbunProvisioner uses
+// (zone listing, record create, record delete), with the semantics verified
+// against the real sandbox: exact-duplicate creates are rejected,
+// everything else stacks.
 type fakePorkbunServer struct {
 	mu sync.Mutex
 	// records maps a record's FQDN name to its TXT contents; multiple
@@ -38,6 +45,7 @@ type fakePorkbunServer struct {
 
 	retrieves int
 	creates   int
+	deletes   int
 }
 
 func newFakePorkbun() *fakePorkbunServer {
@@ -81,7 +89,7 @@ func (f *fakePorkbunServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			for i, c := range contents {
 				records = append(records, map[string]string{
-					"id":      strconv.Itoa(i + 1),
+					"id":      fakeRecordID(name, i),
 					"name":    name,
 					"type":    "TXT",
 					"content": c,
@@ -101,19 +109,43 @@ func (f *fakePorkbunServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.lastCreate = body
 		// Sandbox-verified semantics: an exact duplicate is rejected
 		// with DUPLICATE_RECORD; anything else stacks.
-		for _, c := range f.records[body["name"]] {
+		for i, c := range f.records[body["name"]] {
 			if c == body["content"] {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"status":     "ERROR",
 					"code":       porkbunDuplicateCode,
 					"message":    "A DNS record with this name, type, and content already exists.",
-					"existingId": "1",
+					"existingId": fakeRecordID(body["name"], i),
 				})
 				return
 			}
 		}
 		f.records[body["name"]] = append(f.records[body["name"]], body["content"])
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "SUCCESS", "id": "1"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "SUCCESS", "id": fakeRecordID(body["name"], len(f.records[body["name"]])-1)})
+
+	case strings.HasPrefix(r.URL.Path, "/dns/delete/"):
+		f.deletes++
+		rest := strings.TrimPrefix(r.URL.Path, "/dns/delete/")
+		domain, id, ok := strings.Cut(rest, "/")
+		if !ok {
+			http.Error(w, "bad delete path", http.StatusBadRequest)
+			return
+		}
+		for name, contents := range f.records {
+			if !strings.HasSuffix(name, "."+domain) {
+				continue
+			}
+			for i := range contents {
+				if fakeRecordID(name, i) == id {
+					f.records[name] = append(contents[:i:i], contents[i+1:]...)
+					_ = json.NewEncoder(w).Encode(map[string]any{"status": "SUCCESS"})
+					return
+				}
+			}
+		}
+		// Deleting an id that is not in the zone: the real API errors
+		// rather than deleting something else.
+		writeError("INVALID_RECORD_ID")
 
 	default:
 		http.Error(w, "unknown endpoint", http.StatusNotFound)
@@ -363,4 +395,69 @@ func TestLoadPorkbunCredentials(t *testing.T) {
 			t.Fatalf("expected an error for empty credentials, got ok=%v err=%v", ok, err)
 		}
 	})
+}
+
+func TestPorkbunListAtproto(t *testing.T) {
+	// A realistic zone: two handle records, a stacked (corrupt) name, a
+	// non-handle TXT record on an _atproto name, a nested multi-level
+	// name, and a foreign record type — only the niceat-shaped handle
+	// records may be returned.
+	f := newFakePorkbun()
+	other := "did:plc:" + strings.Repeat("y", 24)
+	f.records[fqdn(testDomain, "john")] = []string{"did=" + validPLC}
+	f.records[fqdn(testDomain, "mary")] = []string{"did=" + other}
+	f.records[fqdn(testDomain, "stacked")] = []string{"did=" + validPLC, "did=" + other}
+	f.records[fqdn(testDomain, "spf")] = []string{"v=spf1 -all"}
+	f.records["_atproto.a.b."+testDomain] = []string{"did=" + validPLC}
+	p := newTestPorkbun(t, f)
+
+	records, err := p.listAtproto(context.Background(), testDomain)
+	if err != nil {
+		t.Fatalf("listAtproto: %v", err)
+	}
+	got := make(map[string]string) // id -> label
+	for _, r := range records {
+		got[r.ID] = r.Label
+	}
+	// john, mary, and both halves of the stacked name: 4 records.
+	want := map[string]string{
+		fakeRecordID(fqdn(testDomain, "john"), 0):    "john",
+		fakeRecordID(fqdn(testDomain, "mary"), 0):    "mary",
+		fakeRecordID(fqdn(testDomain, "stacked"), 0): "stacked",
+		fakeRecordID(fqdn(testDomain, "stacked"), 1): "stacked",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("listAtproto returned %d records (%v), want %d", len(got), got, len(want))
+	}
+	for id, label := range want {
+		if got[id] != label {
+			t.Errorf("record %s = label %q, want %q", id, got[id], label)
+		}
+	}
+}
+
+func TestPorkbunDeleteRecord(t *testing.T) {
+	f := newFakePorkbun()
+	other := "did:plc:" + strings.Repeat("y", 24)
+	// A stacked name: the reaper deletes one half by id and must leave
+	// the other half untouched.
+	f.records[fqdn(testDomain, "john")] = []string{"did=" + validPLC, "did=" + other}
+	p := newTestPorkbun(t, f)
+
+	if err := p.deleteRecord(context.Background(), testDomain, fakeRecordID(fqdn(testDomain, "john"), 1)); err != nil {
+		t.Fatalf("deleteRecord: %v", err)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	remaining := f.records[fqdn(testDomain, "john")]
+	if len(remaining) != 1 || remaining[0] != "did="+validPLC {
+		t.Fatalf("wrong record deleted; remaining: %v", remaining)
+	}
+
+	// Deleting an id that is not in the zone must be an error, not a
+	// silent success.
+	if err := p.deleteRecord(context.Background(), testDomain, "no-such-id"); err == nil {
+		t.Fatal("expected an error deleting a nonexistent record id")
+	}
 }

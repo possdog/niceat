@@ -13,8 +13,9 @@ into the Go binary.
 **DNS is the claim store.**  Whether a handle is available — and who it
 belongs to — is decided entirely by the existence and content of the
 `_atproto` TXT record in Porkbun.  There is deliberately no local ledger
-that could desync with the planned reaper, manual Porkbun dashboard edits,
-or zone restores.
+that could desync with the reaper, manual Porkbun dashboard edits,
+or zone restores.  (The reaper's `reaper_state.json` is a timing cache, not
+a claim ledger — see Defenses.)
 
 ## Build & run
 
@@ -26,7 +27,8 @@ directory; the file is instance-specific and gitignored:
 ```json
 {
   "domains": ["wagg.ing", "yeen.world"],
-  "addr": ":8080"
+  "addr": ":8080",
+  "reaper": {"enabled": true, "interval": "6h", "grace": "720h"}
 }
 ```
 
@@ -35,6 +37,11 @@ directory; the file is instance-specific and gitignored:
   stripped, duplicates removed) — a bad entry is a startup error naming the
   offending value.
 - `addr` (optional): HTTP listen address, defaults to `:8080`.
+- `reaper` (optional): the background handle reaper (see Defenses).
+  `enabled` defaults to true; `interval` (default `6h`) is the time
+  between sweeps; `grace` (default `720h` = 30 days) is how long a
+  handle-account mismatch must persist before the record is deleted.
+  Durations are Go duration strings; invalid ones fail at startup.
 - Unknown fields are rejected (`DisallowUnknownFields`), so a typo like
   `"domain"` fails loudly instead of silently yielding an empty domain set.
 
@@ -144,7 +151,9 @@ cmd/niceat/
 ├── validate.go    — parseDomain, normalizeHandle, validateDID
 ├── ratelimit.go   — per-IP token bucket middleware
 ├── provision.go   — provisioner interface + outcomes, memoryProvisioner
-├── porkbun.go     — Porkbun client: zone listing, per-DID cap, create
+├── porkbun.go     — Porkbun client: zone listing, per-DID cap, create, reaper primitives
+├── resolver.go    — DID document resolution (plc.directory / did:web well-known)
+├── reaper.go      — background task: sweep zones, grace state file, delete unused
 ├── web.go         — go:embed of the built form page + serveIndex
 ├── web/           — frontend build artifact (index.html), committed
 └── *_test.go      — tests alongside source, fakes in helpers_test.go / porkbun_test.go
@@ -204,7 +213,8 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   `_atproto` name (corrupt per the atproto spec) is treated as taken, never
   stacked onto.  The check-then-create flow runs under a per-label lock
   (`labelLocks`) so concurrent requests cannot stack records.  No local
-  ledger exists that could desync with the reaper below.
+  ledger exists that could desync with the reaper (whose state file is a
+  timing cache, not a claim ledger — see the reaper bullet below).
 - **Per-IP rate limiting** (`ratelimit.go`) — token bucket per client IP
   (x/time/rate): burst 5, sustained 1 per 10 s; excess requests get 429.
   It wraps only `/register` — loading the form page is a public static
@@ -227,21 +237,35 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
 - **Audit logging** (`handlers.go`) — every successful registration logs
   `AUDIT: <status> <handle> -> <did> (client <ip>)`.  There is no local
   ledger by design, so this line is the only record of who took what when —
-  useful for dispute resolution and for debugging the future reaper.
+  useful for dispute resolution and for debugging the reaper.
   Handle and DID are charset-validated before this point, so the log line
   cannot be forged via newline injection.
 - **Server timeouts** (`main.go`) — ReadHeaderTimeout 10s, ReadTimeout 30s,
   WriteTimeout 30s, IdleTimeout 2m on the `http.Server`, so a slowloris
   client cannot pin connections open indefinitely.
-- **Handle reaper** — deliberately NOT yet implemented.  The account is the
-  authority, not DNS, so DID ownership is not verified at registration;
-  instead a slow background task will iterate the DNS records, resolve
-  each DID (plc.directory for did:plc; the DID document's `aka` field
-  lists the handles an account actually uses), and delete records whose
-  account does not use the handle — freeing the label for someone else.
-  It needs a grace period: users necessarily set their username in-app
-  *after* the DNS record exists, or the bidirectional link could never be
-  established.  This is the main remaining gap before public exposure.
+- **Handle reaper** (`reaper.go`, `resolver.go`) — frees labels whose
+  accounts no longer use them.  A background task sweeps every managed
+  zone (default every 6h, plus once at startup), resolves each record's
+  DID (plc.directory for `did:plc`, the domain's `/.well-known/did.json`
+  for `did:web`), and checks the DID document's `alsoKnownAs` for
+  `at://<handle>` — the list of handles the account actually uses.  Only
+  AFFIRMATIVE evidence counts: a directory 404 means the account is gone;
+  a network error or an unverifiable DID means skip and retry next pass.
+  A mismatch must persist for the whole grace period (default 30 days,
+  the chicken-and-egg allowance for setting the username in-app after the
+  record exists) before the record is deleted — every reap logs an
+  `AUDIT: reaped ...` line for dispute resolution.  Stacked (corrupt)
+  `_atproto` names are judged record by record, so a stacked pair loses
+  its dead half and keeps its live one, healing the handle.  Grace
+  clocks live in `reaper_state.json` (working directory, gitignored),
+  keyed by **Porkbun record ID**: a re-registered label gets a fresh
+  record ID and therefore a fresh grace clock, so the reaper can never
+  delete a new claim on a stale clock; and the file is a timing cache,
+  not a claim ledger — losing or corrupting it only restarts clocks
+  (reaps are delayed, never accelerated).  The reaper only runs with
+  real Porkbun credentials (there is nothing to sweep in the
+  memoryProvisioner) and needs `porkbun.com` network egress in
+  production.
 
 ## Deployment notes (not code)
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 // defaultConfigPath is where loadConfig looks when -config is not given.
@@ -31,6 +32,28 @@ type config struct {
 	// Addr is the HTTP listen address.  Optional; defaults to
 	// defaultListenAddr when omitted or empty.
 	Addr string `json:"addr"`
+	// Reaper configures the background handle reaper.  Optional; every
+	// field defaults sensibly (see reaperSettings).
+	Reaper *reaperSettings `json:"reaper,omitempty"`
+
+	// Resolved reaper settings (filled in by loadConfig, not on disk).
+	reaperEnabled  bool
+	reaperInterval time.Duration
+	reaperGrace    time.Duration
+}
+
+// reaperSettings is the "reaper" section of the config file, e.g.:
+//
+//	"reaper": {"enabled": true, "interval": "6h", "grace": "720h"}
+//
+// Durations are Go duration strings (time.ParseDuration).  Enabled is a
+// pointer so an omitted section can default to enabled: a bare bool would
+// default to false and silently disable reaping in every config that
+// doesn't mention it.
+type reaperSettings struct {
+	Enabled  *bool  `json:"enabled,omitempty"`
+	Interval string `json:"interval,omitempty"`
+	Grace    string `json:"grace,omitempty"`
 }
 
 // loadConfig reads, parses, and validates the config file at path.
@@ -75,6 +98,31 @@ func loadConfig(path string) (*config, error) {
 
 	if cfg.Addr == "" {
 		cfg.Addr = defaultListenAddr
+	}
+
+	// Resolve the reaper settings into concrete values (and validate the
+	// duration strings) so the rest of the program never re-parses.
+	cfg.reaperEnabled = true
+	cfg.reaperInterval = defaultReaperInterval
+	cfg.reaperGrace = defaultReaperGrace
+	if cfg.Reaper != nil {
+		if cfg.Reaper.Enabled != nil {
+			cfg.reaperEnabled = *cfg.Reaper.Enabled
+		}
+		if cfg.Reaper.Interval != "" {
+			d, err := time.ParseDuration(cfg.Reaper.Interval)
+			if err != nil || d <= 0 {
+				return nil, fmt.Errorf("%s: reaper.interval must be a positive duration (e.g. \"6h\")", path)
+			}
+			cfg.reaperInterval = d
+		}
+		if cfg.Reaper.Grace != "" {
+			d, err := time.ParseDuration(cfg.Reaper.Grace)
+			if err != nil || d <= 0 {
+				return nil, fmt.Errorf("%s: reaper.grace must be a positive duration (e.g. \"720h\")", path)
+			}
+			cfg.reaperGrace = d
+		}
 	}
 	return &cfg, nil
 }
