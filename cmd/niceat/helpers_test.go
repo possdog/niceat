@@ -78,12 +78,18 @@ func doRegisterAt(t *testing.T, a *app, host, body, contentType string) *httptes
 	return w
 }
 
-// doRegisterMux sends a request through a mux wired exactly like main.go's,
-// to exercise method routing (405/404) rather than just the handler.
+// doRegisterMux sends a request through the app's real mux (a fresh one per
+// call, with a fresh rate limiter so the burst budget is never consumed), to
+// exercise routing (405/404, the form page) rather than just the handler.
 func doRegisterMux(t *testing.T, a *app, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /register", a.handleRegister)
+	return doMux(t, a.newMux(newRateLimiter()), method, target, body)
+}
+
+// doMux sends a request through an explicit mux, for tests that need many
+// requests to share one (and therefore share one rate limiter).
+func doMux(t *testing.T, mux *http.ServeMux, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	req.Host = testDomain
 	req.Header.Set("Content-Type", "application/json")

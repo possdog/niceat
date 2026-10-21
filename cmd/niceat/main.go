@@ -62,22 +62,11 @@ func main() {
 
 	srv := &app{domains: cfg.managedSet(), provisioner: backend}
 
-	mux := http.NewServeMux()
-	// Method-specific pattern: non-POST requests to /register get a 405
-	// from the mux without any handler code.
-	mux.HandleFunc("POST /register", srv.handleRegister)
-	// TODO(frontend): the form will be served from this same mux, on every
-	// managed domain.  It must be parameterized by the request Host — e.g.
-	// "get your handle under *@wagg.ing*" on wagg.ing, the equivalent for
-	// yeen.world on yeen.world — and post to the same origin, so the Host
-	// header carries the domain selection for /register too.
-
-	// Per-IP rate limiting wraps everything; see ratelimit.go.
-	rl := newRateLimiter()
+	mux := srv.newMux(newRateLimiter())
 
 	httpServer := &http.Server{
 		Addr:    cfg.Addr,
-		Handler: rl.middleware(mux),
+		Handler: mux,
 		// Timeouts cap how long any single client can hold a
 		// connection, so slow or stalled clients (slowloris) cannot
 		// pin file descriptors indefinitely.  Every response this
@@ -110,4 +99,20 @@ func main() {
 		log.Printf("HTTP shutdown error: %v", err)
 	}
 	log.Println("server stopped")
+}
+
+// newMux wires the HTTP routes: the rate-limited registration API and the
+// static frontend page.  main.go serves exactly this mux and the tests
+// exercise routing through it, so their behavior cannot drift apart.
+func (a *app) newMux(rl *rateLimiter) *http.ServeMux {
+	mux := http.NewServeMux()
+	// Method-specific pattern: non-POST requests to /register get a 405
+	// from the mux without any handler code.  The per-IP rate limiter
+	// wraps only this route — the form page is a public static read and
+	// must not consume a visitor's registration budget.
+	mux.Handle("POST /register", rl.middleware(http.HandlerFunc(a.handleRegister)))
+	// {$} matches only "/" exactly; every other path falls through to the
+	// mux's plain 404.
+	mux.HandleFunc("GET /{$}", a.serveIndex)
+	return mux
 }

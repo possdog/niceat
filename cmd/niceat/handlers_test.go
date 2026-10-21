@@ -443,7 +443,7 @@ func TestRegisterRouting(t *testing.T) {
 		{"GET /register is 405", http.MethodGet, "/register", http.StatusMethodNotAllowed},
 		{"PUT /register is 405", http.MethodPut, "/register", http.StatusMethodNotAllowed},
 		{"POST /other is 404", http.MethodPost, "/other", http.StatusNotFound},
-		{"GET / is 404", http.MethodGet, "/", http.StatusNotFound},
+		{"GET / is the form page", http.MethodGet, "/", http.StatusOK},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

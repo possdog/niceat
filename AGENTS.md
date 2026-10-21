@@ -3,10 +3,12 @@
 ## Project overview
 
 niceat lets communities self-service Bluesky handles under a shared domain:
-a web form (not yet built) collects a desired handle label plus the user's
-Bluesky account DID, and this API provisions the `_atproto` TXT record that
-binds `<label>.<domain>` to the DID via the Porkbun DNS API.  Go 1.26,
-standard library plus `golang.org/x/time`, one package at `cmd/niceat/`.
+a web form collects a desired handle label plus the user's Bluesky account
+DID, and this API provisions the `_atproto` TXT record that binds
+`<label>.<domain>` to the DID via the Porkbun DNS API.  Go 1.26, standard
+library plus `golang.org/x/time`, one Go package at `cmd/niceat/`, plus a
+Svelte frontend subproject at `frontend/` whose single-file build is embedded
+into the Go binary.
 
 **DNS is the claim store.**  Whether a handle is available — and who it
 belongs to — is decided entirely by the existence and content of the
@@ -37,10 +39,17 @@ directory; the file is instance-specific and gitignored:
   `"domain"` fails loudly instead of silently yielding an empty domain set.
 
 ```bash
+cd frontend && pnpm build   # regenerate cmd/niceat/web/index.html (see below)
 go build -o niceat ./cmd/niceat
 ./niceat                       # reads ./niceat.json, listens on config "addr"
 ./niceat -addr :8123           # same config, listen address overridden
 ```
+
+The frontend artifact `cmd/niceat/web/index.html` is committed so a plain
+Go checkout builds without a Node toolchain: regenerate it with
+`pnpm build` in `frontend/` after any frontend change and commit the result.
+Never edit it by hand — it is a 700 kB minified bundle.  See
+frontend/AGENTS.md for the frontend's own conventions.
 
 Only two flags exist.  `-config` defaults to `niceat.json` relative to the
 current working directory, so a service manager just needs to set the
@@ -60,8 +69,11 @@ smoke tests are safe.
 
 ## The API (what exists today)
 
-Single endpoint:
+Two routes (wired in `newMux`, main.go; tests exercise the same mux):
 
+- **GET /** — the embedded registration form page (see Frontend below).
+  Gated on the Host like /register: an unmanaged host gets 421 instead of a
+  form whose every submission would fail.
 - **POST /register** — JSON `{"handle": "<label>", "did": "did:plc:..."}`.
   Returns `201 {"status":"created","handle":"<label>.<domain>"}`.
 
@@ -133,7 +145,11 @@ cmd/niceat/
 ├── ratelimit.go   — per-IP token bucket middleware
 ├── provision.go   — provisioner interface + outcomes, memoryProvisioner
 ├── porkbun.go     — Porkbun client: zone listing, per-DID cap, create
+├── web.go         — go:embed of the built form page + serveIndex
+├── web/           — frontend build artifact (index.html), committed
 └── *_test.go      — tests alongside source, fakes in helpers_test.go / porkbun_test.go
+
+frontend/           — Svelte 5 + Bulma + Vite source; pnpm build emits cmd/niceat/web/index.html
 ```
 
 One third-party dependency exists alongside the standard library, matching
@@ -161,26 +177,38 @@ concurrent requests for the same label must not both pass the "no record"
 check and stack records.  The lock is process-local, which is correct only
 while the deployment is a single instance.
 
-## Planned frontend (not yet built)
+## Frontend
 
-The form will be served from the same mux on every managed domain, and its
-markup must be parameterized by the request Host — "get your handle under
-*@wagg.ing*" on wagg.ing, the equivalent on yeen.world — posting the form
-same-origin so the Host header carries the domain selection.  See the
-TODO(frontend) note in main.go.
+`frontend/` is a Svelte 5 (runes) + Bulma v1 + Vite 8 app built with
+`vite-plugin-singlefile` into one self-contained `index.html` (all JS and
+CSS inlined), emitted directly into `cmd/niceat/web/` for `go:embed`.  The
+Go server serves it unchanged at `/` on every managed domain:
+the domain parameterization is **client-side** — the page reads
+`location.hostname` to show "*a Bluesky handle under wagg.ing*" (the
+equivalent on yeen.world) and posts the form same-origin, so the Host
+header carries the domain selection.  The server does no per-Host markup.
+
+The artifact is committed so `go build` works without a Node toolchain;
+regenerate with `pnpm build` in `frontend/` after any frontend change.
+For frontend-specific conventions (pnpm, Bulma-over-custom-CSS, no
+SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
+`/register` to a locally running Go server with the Host forced to
+`wagg.ing` (the dev niceat.json must list it).
 
 ## Defenses
 
 - **DNS as the claim store** (`porkbun.go`) — availability and ownership are
-  read from the `_atproto` TXT record itself (retrieveByNameType), and the
-  record is created only when absent.  A same-DID repeat is an idempotent
-  200; a different DID is refused with 409.  A multi-record `_atproto` name
-  (corrupt per the atproto spec) is treated as taken, never stacked onto.
-  The check-then-create flow runs under a per-label lock (`labelLocks`) so
-  concurrent requests cannot stack records.  No local ledger exists that
-  could desync with the reaper below.
+  read from the `_atproto` TXT records in a single zone listing, and the
+  record is created only when the label is absent.  A same-DID repeat is an
+  idempotent 200; a different DID is refused with 409.  A multi-record
+  `_atproto` name (corrupt per the atproto spec) is treated as taken, never
+  stacked onto.  The check-then-create flow runs under a per-label lock
+  (`labelLocks`) so concurrent requests cannot stack records.  No local
+  ledger exists that could desync with the reaper below.
 - **Per-IP rate limiting** (`ratelimit.go`) — token bucket per client IP
   (x/time/rate): burst 5, sustained 1 per 10 s; excess requests get 429.
+  It wraps only `/register` — loading the form page is a public static
+  read and must not consume a visitor's registration budget.
   Client IP comes from `RemoteAddr` normally; when the direct peer is a
   trusted proxy (localhost only), the **rightmost** `X-Forwarded-For`
   entry is used — a client can't mint fresh buckets by spoofing left-side
@@ -234,13 +262,16 @@ go test -count=1 -v ./cmd/niceat/   # full run
 go test -count=1 -run TestValidateDID ./cmd/niceat/   # subset
 go vet ./cmd/niceat/
 gofmt -l .   # must print nothing
+cd frontend && pnpm check && pnpm build   # frontend typecheck + rebuild artifact
 ```
 
 Tests are fully self-contained (`fakeProvisioner`, `fakePorkbunServer`,
 `httptest`); no network, no fixtures.  When changing validation rules, extend
 the table tests in `validate_test.go` — they are the spec for handle/DID
 acceptance.  When changing Porkbun call semantics, extend `porkbun_test.go` —
-its fake mirrors the sandbox-verified duplicate/stacking behavior.
+its fake mirrors the sandbox-verified duplicate/stacking behavior.  When
+changing routing, extend `web_test.go` / the mux tests — they run against
+the same `newMux` main.go serves.
 
 ## Conventions
 
