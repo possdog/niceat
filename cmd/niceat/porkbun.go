@@ -14,15 +14,19 @@ import (
 	"time"
 )
 
-// Porkbun API constants.  Base URL, endpoints and credential filenames per
+// Porkbun API constants.  Base URL, endpoints and credential layout per
 // the v3 docs (https://porkbun.com/api/json/v3/documentation); create
 // semantics verified against the sandbox API on 2026-10-15.
 const (
-	porkbunBaseURL    = "https://api.porkbun.com/api/json/v3"
-	porkbunAPIKeyFile = "porkbun_api_key.txt"
-	porkbunSecretFile = "porkbun_secret_key.txt"
-	porkbunTimeout    = 10 * time.Second
-	porkbunRecordTTL  = "300"
+	porkbunBaseURL = "https://api.porkbun.com/api/json/v3"
+	// Credentials are strictly per domain: production Porkbun keys are
+	// scoped (dns scope, single-domain allowlist), so the working
+	// directory holds one key pair per managed domain under
+	// porkbun_keys/.  There is deliberately no global fallback pair —
+	// a shared pair would defeat the scoping's blast-radius containment.
+	porkbunKeysDir   = "porkbun_keys"
+	porkbunTimeout   = 10 * time.Second
+	porkbunRecordTTL = "300"
 	// porkbunDuplicateCode is Porkbun's machine-readable code for an exact
 	// duplicate create (same name, type and content).
 	porkbunDuplicateCode = "DUPLICATE_RECORD"
@@ -36,13 +40,19 @@ const (
 // can branch on it with errors.Is.
 var errDuplicateRecord = errors.New("porkbun: duplicate record")
 
+// porkbunCreds is one domain's Porkbun API key pair, as scoped in the
+// Porkbun dashboard (dns scope, that domain only).
+type porkbunCreds struct {
+	apiKey    string
+	secretKey string
+}
+
 // porkbunProvisioner provisions _atproto TXT records through the Porkbun
 // DNS API.  DNS is the claim store — there is deliberately no local ledger:
 // the existence and content of the TXT record are the single source of
 // truth, so nothing can desync (not the reaper's grace-clock file, which
 // only affects when a record is deleted and never who owns it, not manual
-// edits
-// in the Porkbun dashboard, not zone restores).
+// dashboard edits, not zone restores).
 //
 // Sandbox-verified semantics this implementation relies on:
 //
@@ -59,54 +69,71 @@ var errDuplicateRecord = errors.New("porkbun: duplicate record")
 // label is closed by the handler's per-label lock (app.go); this client is
 // safe to use under it.
 //
-// Credential scoping: production keys will be scoped per domain (dns scope,
-// allowed-domain allowlist), so this client will be expected to select and
-// forward a unique key pair per managed domain.  Provision already receives
-// the Host-resolved domain, so the change is contained here and in the
-// credential loading — the handler and the create/retrieve flows stay as
-// they are.
+// Credentials are held per domain and selected on every call by the same
+// domain that is interpolated into the endpoint path, so a request for one
+// community can never be authenticated (or billed, or rate-limited) with
+// another's key.
 type porkbunProvisioner struct {
-	apiKey    string
-	secretKey string
-	baseURL   string
-	hc        *http.Client
+	creds   map[string]porkbunCreds
+	baseURL string
+	hc      *http.Client
 }
 
-// newPorkbunProvisioner returns a client for the given credential pair.  An
-// empty baseURL selects the production endpoint; tests point it at an
-// httptest server.
-func newPorkbunProvisioner(apiKey, secretKey, baseURL string) *porkbunProvisioner {
+// newPorkbunProvisioner returns a client for the given per-domain
+// credential pairs.  An empty baseURL selects the production endpoint;
+// tests point it at an httptest server.
+func newPorkbunProvisioner(creds map[string]porkbunCreds, baseURL string) *porkbunProvisioner {
 	if baseURL == "" {
 		baseURL = porkbunBaseURL
 	}
 	return &porkbunProvisioner{
-		apiKey:    apiKey,
-		secretKey: secretKey,
-		baseURL:   baseURL,
-		hc:        &http.Client{Timeout: porkbunTimeout},
+		creds:   creds,
+		baseURL: baseURL,
+		hc:      &http.Client{Timeout: porkbunTimeout},
 	}
 }
 
-// loadPorkbunCredentials reads the API key pair from dir, which is the
-// service working directory (the files are gitignored).  ok=false means
-// both files are absent and the caller should fall back to the in-memory
-// provisioner; one file present without the other is a configuration error,
-// not a fallback, and is reported as such.
-func loadPorkbunCredentials(dir string) (apiKey, secretKey string, ok bool, err error) {
-	apiB, apiErr := os.ReadFile(filepath.Join(dir, porkbunAPIKeyFile))
-	secB, secErr := os.ReadFile(filepath.Join(dir, porkbunSecretFile))
-	if apiErr != nil && secErr != nil {
-		return "", "", false, nil
+// loadPorkbunCredentials reads one API key pair per managed domain from
+// porkbun_keys/ under dir (the service working directory; the files are
+// gitignored).  For each domain in domains it loads
+// porkbun_keys/<domain>.api_key.txt and porkbun_keys/<domain>.secret_key.txt.
+//
+// ok=false means no domain has a pair and the caller should fall back to
+// the in-memory provisioner.  Anything in between is a configuration
+// error, not a fallback: a half-present pair, an empty key, or pairs for
+// some configured domains but not others all fail loudly, because serving
+// a domain whose records could never actually be published would silently
+// eat registrations.
+func loadPorkbunCredentials(dir string, domains []string) (map[string]porkbunCreds, bool, error) {
+	keysDir := filepath.Join(dir, porkbunKeysDir)
+	creds := make(map[string]porkbunCreds, len(domains))
+	var missing []string
+	for _, domain := range domains {
+		apiB, apiErr := os.ReadFile(filepath.Join(keysDir, domain+".api_key.txt"))
+		secB, secErr := os.ReadFile(filepath.Join(keysDir, domain+".secret_key.txt"))
+		if apiErr != nil && secErr != nil {
+			missing = append(missing, domain)
+			continue
+		}
+		if apiErr != nil || secErr != nil {
+			return nil, false, fmt.Errorf("%s: found only one of the api_key / secret_key pair; provide both or neither", domain)
+		}
+		c := porkbunCreds{
+			apiKey:    strings.TrimSpace(string(apiB)),
+			secretKey: strings.TrimSpace(string(secB)),
+		}
+		if c.apiKey == "" || c.secretKey == "" {
+			return nil, false, fmt.Errorf("%s: api_key / secret_key are empty", domain)
+		}
+		creds[domain] = c
 	}
-	if apiErr != nil || secErr != nil {
-		return "", "", false, fmt.Errorf("found only one of %s / %s; provide both or neither", porkbunAPIKeyFile, porkbunSecretFile)
+	if len(creds) == 0 {
+		return nil, false, nil
 	}
-	apiKey = strings.TrimSpace(string(apiB))
-	secretKey = strings.TrimSpace(string(secB))
-	if apiKey == "" || secretKey == "" {
-		return "", "", false, fmt.Errorf("%s / %s are empty", porkbunAPIKeyFile, porkbunSecretFile)
+	if len(creds) < len(domains) {
+		return nil, false, fmt.Errorf("no Porkbun credentials for %s (checked %s/)", strings.Join(missing, ", "), porkbunKeysDir)
 	}
-	return apiKey, secretKey, true, nil
+	return creds, true, nil
 }
 
 // pbEnvelope holds the fields of every Porkbun JSON response this client
@@ -132,17 +159,22 @@ type pbRecord struct {
 }
 
 // call posts an authenticated JSON request to path and decodes the response
-// envelope.  Any non-SUCCESS status becomes an error carrying Porkbun's
+// envelope, authenticating with the given managed domain's own key pair.
+// Any non-SUCCESS status becomes an error carrying Porkbun's
 // machine-readable code, so callers can branch on behavior rather than
 // message text; exact duplicates become the errDuplicateRecord sentinel.
 // Errors are for the server log only — the handler never leaks them to
 // clients.
-func (p *porkbunProvisioner) call(ctx context.Context, path string, body map[string]string) (pbEnvelope, error) {
+func (p *porkbunProvisioner) call(ctx context.Context, domain, path string, body map[string]string) (pbEnvelope, error) {
 	// The endpoint paths interpolate only the Host-resolved domain and the
 	// validated label, both of which are restricted to [a-z0-9.-] by
 	// validation, so no URL escaping is needed.
-	body["apikey"] = p.apiKey
-	body["secretapikey"] = p.secretKey
+	c, ok := p.creds[domain]
+	if !ok {
+		return pbEnvelope{}, fmt.Errorf("porkbun: no credentials loaded for %s", domain)
+	}
+	body["apikey"] = c.apiKey
+	body["secretapikey"] = c.secretKey
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return pbEnvelope{}, err
@@ -185,7 +217,7 @@ func (p *porkbunProvisioner) call(ctx context.Context, path string, body map[str
 func (p *porkbunProvisioner) Provision(ctx context.Context, domain, label, did string) (provisionOutcome, error) {
 	fqdn := "_atproto." + label + "." + domain
 
-	env, err := p.call(ctx, "/dns/retrieve/"+domain, map[string]string{})
+	env, err := p.call(ctx, domain, "/dns/retrieve/"+domain, map[string]string{})
 	if err != nil {
 		return 0, fmt.Errorf("listing zone records: %w", err)
 	}
@@ -229,7 +261,7 @@ func (p *porkbunProvisioner) Provision(ctx context.Context, domain, label, did s
 		return outcomeDIDLimit, nil
 	}
 
-	env, err = p.call(ctx, "/dns/create/"+domain, map[string]string{
+	env, err = p.call(ctx, domain, "/dns/create/"+domain, map[string]string{
 		"type":    "TXT",
 		"name":    "_atproto." + label,
 		"content": "did=" + did,
@@ -286,7 +318,7 @@ type atprotoRecord struct {
 // which are stale.  Non-_atproto records, foreign content, and
 // non-niceat-shaped names are skipped.
 func (p *porkbunProvisioner) listAtproto(ctx context.Context, domain string) ([]atprotoRecord, error) {
-	env, err := p.call(ctx, "/dns/retrieve/"+domain, map[string]string{})
+	env, err := p.call(ctx, domain, "/dns/retrieve/"+domain, map[string]string{})
 	if err != nil {
 		return nil, fmt.Errorf("listing zone records: %w", err)
 	}
@@ -316,7 +348,7 @@ func (p *porkbunProvisioner) listAtproto(ctx context.Context, domain string) ([]
 // (harmless Porkbun error) or is a different record whose owner it did not
 // judge.
 func (p *porkbunProvisioner) deleteRecord(ctx context.Context, domain, id string) error {
-	if _, err := p.call(ctx, "/dns/delete/"+domain+"/"+id, map[string]string{}); err != nil {
+	if _, err := p.call(ctx, domain, "/dns/delete/"+domain+"/"+id, map[string]string{}); err != nil {
 		return fmt.Errorf("deleting record %s: %w", id, err)
 	}
 	return nil

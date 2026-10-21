@@ -65,14 +65,21 @@ a host runs several services and ports are handed out dynamically, e.g.
 `-addr :0`); empty means "use the config".  Precedence:
 `-addr` flag > config `addr` > `:8080` default.
 
-`porkbun_api_key.txt` / `porkbun_secret_key.txt` in the working directory
-hold the Porkbun credentials (gitignored; never commit, never hard-code
-them into source or logs).  Their presence selects the real Porkbun
-backend; without the pair, the service falls back to `memoryProvisioner`
+Porkbun credentials are **per domain** (mirroring production key scoping):
+`porkbun_keys/<domain>.api_key.txt` and `porkbun_keys/<domain>.secret_key.txt`
+under the working directory hold each managed domain's own key pair
+(gitignored; never commit, never hard-code them into source or logs).
+Pairs for every configured domain select the real Porkbun backend; with no
+pairs at all, the service falls back to `memoryProvisioner`
 (see provision.go) — same semantics, but nothing is published and state is
-lost on restart, so it must never front real traffic.  Current keys are
-sandbox (`pk1_sb_`/`sk1_sb_`): Porkbun requests are simulated, so live
-smoke tests are safe.
+lost on restart, so it must never front real traffic.  Pairs for some
+configured domains but not others, a half-present pair, or an empty key is
+a startup error naming the domain: a domain whose records could never be
+published must fail loudly, not silently eat registrations.  There is
+deliberately no global fallback pair — a shared pair would defeat the
+per-domain scoping's blast-radius containment.  Current keys are
+sandbox (`pk1_sb_`/`sk1_sb_`, scoped to the sandbox account's one probe
+domain): Porkbun requests are simulated, so live smoke tests are safe.
 
 ## The API (what exists today)
 
@@ -269,11 +276,11 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
 
 ## Deployment notes (not code)
 
-- **Porkbun keys will be scoped per domain** in production (dns scope,
-  allowed-domain allowlist).  The backend must therefore load and forward a
-  unique key pair per domain — `Provision` already receives the domain, so
-  the change is contained in `porkbun.go` plus credential loading; see the
-  struct comment in `porkbun.go`.
+- **Porkbun keys must be scoped per domain** in production (dns scope,
+  single-domain allowlist) and installed as the per-domain pair under
+  `porkbun_keys/` (see Build & run).  The client selects each request's
+  key pair by the Host-resolved domain, so one community's key can never
+  touch another's zone.
 - **TLS terminates at Caddy**, which proxies to the service over localhost —
   matching `isTrustedProxy` (trusted proxy = localhost), so
   `X-Forwarded-For` handling works as written.  Caddy must forward the

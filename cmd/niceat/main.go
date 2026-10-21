@@ -45,17 +45,17 @@ func main() {
 		cfg.Addr = *addrOverride
 	}
 
-	// The Porkbun credential pair (porkbun_api_key.txt /
-	// porkbun_secret_key.txt in the working directory, gitignored) selects
-	// the real DNS backend.  Without it, the in-memory fallback runs: same
+	// Per-domain Porkbun credentials (porkbun_keys/<domain>.api_key.txt
+	// and .secret_key.txt in the working directory, gitignored) select the
+	// real DNS backend.  Without them, the in-memory fallback runs: same
 	// semantics, but nothing is published and state is lost on restart.
-	apiKey, secretKey, haveCreds, err := loadPorkbunCredentials(".")
+	creds, haveCreds, err := loadPorkbunCredentials(".", cfg.Domains)
 	if err != nil {
 		log.Fatalf("loading Porkbun credentials: %v", err)
 	}
 	backend := provisioner(newMemoryProvisioner())
 	if haveCreds {
-		backend = newPorkbunProvisioner(apiKey, secretKey, "")
+		backend = newPorkbunProvisioner(creds, "")
 	} else {
 		log.Println("WARNING: no Porkbun credentials found — running the in-memory provisioner; registrations are accepted but no DNS records are created")
 	}

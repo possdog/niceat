@@ -153,12 +153,15 @@ func (f *fakePorkbunServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // newTestPorkbun wires a porkbunProvisioner to a fake Porkbun server and
-// tears the server down when the test ends.
+// tears the server down when the test ends.  The client carries the standard
+// test credential pair for testDomain.
 func newTestPorkbun(t *testing.T, f *fakePorkbunServer) *porkbunProvisioner {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return newPorkbunProvisioner("testkey", "testsecret", srv.URL)
+	return newPorkbunProvisioner(map[string]porkbunCreds{
+		testDomain: {apiKey: "testkey", secretKey: "testsecret"},
+	}, srv.URL)
 }
 
 func TestPorkbunProvisionCreates(t *testing.T) {
@@ -340,7 +343,9 @@ func TestPorkbunProvisionAPIError(t *testing.T) {
 func TestPorkbunProvisionTransportError(t *testing.T) {
 	f := newFakePorkbun()
 	srv := httptest.NewServer(f)
-	p := newPorkbunProvisioner("testkey", "testsecret", srv.URL)
+	p := newPorkbunProvisioner(map[string]porkbunCreds{
+		testDomain: {apiKey: "testkey", secretKey: "testsecret"},
+	}, srv.URL)
 	srv.Close() // every request now fails at the transport layer
 
 	if outcome, err := p.Provision(context.Background(), testDomain, "john", validPLC); err == nil {
@@ -348,51 +353,151 @@ func TestPorkbunProvisionTransportError(t *testing.T) {
 	}
 }
 
+func TestPorkbunProvisionPerDomainCredentials(t *testing.T) {
+	// Each managed domain authenticates with its own scoped key pair:
+	// a create under a community must carry that community's keys, never
+	// another's (the fake captures the full request body, including the
+	// forwarded credentials).
+	f := newFakePorkbun()
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	other := "other.example"
+	p := newPorkbunProvisioner(map[string]porkbunCreds{
+		testDomain: {apiKey: "key-a", secretKey: "secret-a"},
+		other:      {apiKey: "key-b", secretKey: "secret-b"},
+	}, srv.URL)
+
+	if _, err := p.Provision(context.Background(), testDomain, "john", validPLC); err != nil {
+		t.Fatalf("Provision under %s: %v", testDomain, err)
+	}
+	f.mu.Lock()
+	if f.lastCreate["apikey"] != "key-a" || f.lastCreate["secretapikey"] != "secret-a" {
+		t.Fatalf("create under %s carried wrong credentials: %v", testDomain, f.lastCreate)
+	}
+	f.mu.Unlock()
+
+	if _, err := p.Provision(context.Background(), other, "mary", validPLC); err != nil {
+		t.Fatalf("Provision under %s: %v", other, err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lastCreate["apikey"] != "key-b" || f.lastCreate["secretapikey"] != "secret-b" {
+		t.Fatalf("create under %s carried wrong credentials: %v", other, f.lastCreate)
+	}
+}
+
+func TestPorkbunNoCredentialsForDomain(t *testing.T) {
+	// A domain with no loaded pair must fail loudly rather than send some
+	// other community's keys at its zone.  (Strict startup loading makes
+	// this unreachable in production; the guard is defense in depth.)
+	f := newFakePorkbun()
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	p := newPorkbunProvisioner(map[string]porkbunCreds{
+		testDomain: {apiKey: "testkey", secretKey: "testsecret"},
+	}, srv.URL)
+
+	if _, err := p.Provision(context.Background(), "other.example", "john", validPLC); err == nil {
+		t.Fatal("expected an error provisioning under a domain with no credentials")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.creates != 0 {
+		t.Fatalf("no create expected without credentials, got %d", f.creates)
+	}
+}
+
 func TestLoadPorkbunCredentials(t *testing.T) {
-	write := func(t *testing.T, dir, name, content string) {
+	write := func(t *testing.T, dir, domain, name, content string) {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0600); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
+		if err := os.MkdirAll(filepath.Join(dir, porkbunKeysDir), 0700); err != nil {
+			t.Fatalf("creating %s: %v", porkbunKeysDir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, porkbunKeysDir, domain+"."+name+".txt"), []byte(content), 0600); err != nil {
+			t.Fatalf("writing %s.%s: %v", domain, name, err)
 		}
 	}
+	domains := []string{"wagg.ing", "yeen.world"}
 
-	t.Run("both files present", func(t *testing.T) {
+	t.Run("all domains have pairs", func(t *testing.T) {
 		dir := t.TempDir()
-		write(t, dir, porkbunAPIKeyFile, "pk1_sb_test\n")
-		write(t, dir, porkbunSecretFile, "sk1_sb_test\n")
-		apiKey, secretKey, ok, err := loadPorkbunCredentials(dir)
+		write(t, dir, "wagg.ing", "api_key", "pk1_a\n")
+		write(t, dir, "wagg.ing", "secret_key", "sk1_a\n")
+		write(t, dir, "yeen.world", "api_key", "pk1_b")
+		write(t, dir, "yeen.world", "secret_key", "sk1_b")
+		creds, ok, err := loadPorkbunCredentials(dir, domains)
 		if err != nil || !ok {
 			t.Fatalf("expected ok, got ok=%v err=%v", ok, err)
 		}
-		if apiKey != "pk1_sb_test" || secretKey != "sk1_sb_test" {
-			t.Fatalf("credentials not trimmed: %q / %q", apiKey, secretKey)
+		want := map[string]porkbunCreds{
+			"wagg.ing":   {apiKey: "pk1_a", secretKey: "sk1_a"},
+			"yeen.world": {apiKey: "pk1_b", secretKey: "sk1_b"},
+		}
+		for _, d := range domains {
+			if creds[d] != want[d] {
+				t.Fatalf("creds for %s = %+v, want %+v", d, creds[d], want[d])
+			}
 		}
 	})
 
-	t.Run("neither file present", func(t *testing.T) {
-		_, _, ok, err := loadPorkbunCredentials(t.TempDir())
+	t.Run("no pair for any domain", func(t *testing.T) {
+		_, ok, err := loadPorkbunCredentials(t.TempDir(), domains)
 		if err != nil {
-			t.Fatalf("missing pair must be a fallback, not an error: %v", err)
+			t.Fatalf("missing pairs must be a fallback, not an error: %v", err)
 		}
 		if ok {
-			t.Fatalf("expected ok=false for a missing pair")
+			t.Fatal("expected ok=false when no domain has a pair")
 		}
 	})
 
-	t.Run("one file present", func(t *testing.T) {
+	t.Run("some domains missing", func(t *testing.T) {
+		// Pairs for some communities but not others is a partial
+		// deployment: the unprovisionable domains would silently eat
+		// registrations, so it must fail loudly.
 		dir := t.TempDir()
-		write(t, dir, porkbunAPIKeyFile, "pk1_sb_test")
-		if _, _, ok, err := loadPorkbunCredentials(dir); err == nil || ok {
+		write(t, dir, "wagg.ing", "api_key", "pk1_a")
+		write(t, dir, "wagg.ing", "secret_key", "sk1_a")
+		_, ok, err := loadPorkbunCredentials(dir, domains)
+		if err == nil || ok {
+			t.Fatalf("expected an error naming the missing domain, got ok=%v err=%v", ok, err)
+		}
+		if !strings.Contains(err.Error(), "yeen.world") {
+			t.Fatalf("error should name the missing domain, got: %v", err)
+		}
+	})
+
+	t.Run("half pair", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "wagg.ing", "api_key", "pk1_a")
+		_, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
+		if err == nil || ok {
 			t.Fatalf("expected an error for a half-present pair, got ok=%v err=%v", ok, err)
 		}
 	})
 
-	t.Run("empty file", func(t *testing.T) {
+	t.Run("empty key", func(t *testing.T) {
 		dir := t.TempDir()
-		write(t, dir, porkbunAPIKeyFile, "  \n")
-		write(t, dir, porkbunSecretFile, "sk1_sb_test")
-		if _, _, ok, err := loadPorkbunCredentials(dir); err == nil || ok {
+		write(t, dir, "wagg.ing", "api_key", "  \n")
+		write(t, dir, "wagg.ing", "secret_key", "sk1_a")
+		_, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
+		if err == nil || ok {
 			t.Fatalf("expected an error for empty credentials, got ok=%v err=%v", ok, err)
+		}
+	})
+
+	t.Run("unconfigured domain files ignored", func(t *testing.T) {
+		// Only configured domains are consulted: a pair for a domain
+		// this instance does not manage must not resurrect it or
+		// block the credential-less fallback.
+		dir := t.TempDir()
+		write(t, dir, "unmanaged.example", "api_key", "pk1_x")
+		write(t, dir, "unmanaged.example", "secret_key", "sk1_x")
+		_, ok, err := loadPorkbunCredentials(dir, domains)
+		if err != nil {
+			t.Fatalf("unmanaged pair must be ignored: %v", err)
+		}
+		if ok {
+			t.Fatal("expected ok=false when no managed domain has a pair")
 		}
 	})
 }
