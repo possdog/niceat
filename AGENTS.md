@@ -44,6 +44,10 @@ directory; the file is instance-specific and gitignored:
   Durations are Go duration strings; invalid ones fail at startup.
 - Unknown fields are rejected (`DisallowUnknownFields`), so a typo like
   `"domain"` fails loudly instead of silently yielding an empty domain set.
+A template with every knob at its default value lives at
+`niceat.example.json` — copy it to `niceat.json` and edit.  (JSON has no
+comments, so the field reference is the surrounding text here, and
+comment keys like `"_comment"` would fail `DisallowUnknownFields`.)
 
 ```bash
 cd frontend && pnpm build   # generate cmd/niceat/web/index.html (see below)

@@ -1,0 +1,9 @@
+{
+  "domains": ["wagg.ing", "yeen.world"],
+  "addr": ":8080",
+  "reaper": {
+    "enabled": true,
+    "interval": "6h",
+    "grace": "720h"
+  }
+}
