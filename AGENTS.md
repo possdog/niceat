@@ -77,7 +77,12 @@ configured domains but not others, a half-present pair, or an empty key is
 a startup error naming the domain: a domain whose records could never be
 published must fail loudly, not silently eat registrations.  There is
 deliberately no global fallback pair — a shared pair would defeat the
-per-domain scoping's blast-radius containment.  Current keys are
+per-domain scoping's blast-radius containment.  Credentials can also come
+from environment variables, `PORKBUN_<DOMAIN>_API_KEY` /
+`PORKBUN_<DOMAIN>_SECRET_KEY` (domain uppercased, `.` and `-` → `_`; two
+domains mapping to one suffix is a startup error).  Env wins over files —
+that is Fly.io's secrets model (`fly secrets set`), and a stale local-dev
+file must not shadow what the operator set.  Current keys are
 sandbox (`pk1_sb_`/`sk1_sb_`, scoped to the sandbox account's one probe
 domain): Porkbun requests are simulated, so live smoke tests are safe.
 
@@ -155,6 +160,7 @@ cmd/niceat/
 ├── config.go      — JSON config type, strict loadConfig, managedSet
 ├── app.go         — app struct, labelLocks, regexes, reservedLabels, JSON types
 ├── handlers.go    — resolveDomain, handleRegister + writeJSON
+├── healthz.go     — GET /healthz liveness probe for deploy-time checks
 ├── validate.go    — parseDomain, normalizeHandle, validateDID
 ├── ratelimit.go   — per-IP token bucket middleware
 ├── provision.go   — provisioner interface + outcomes, memoryProvisioner
@@ -229,7 +235,13 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   Client IP comes from `RemoteAddr` normally; when the direct peer is a
   trusted proxy (localhost only), the **rightmost** `X-Forwarded-For`
   entry is used — a client can't mint fresh buckets by spoofing left-side
-  entries.  `X-Real-IP` is never trusted.  Idle IPs are evicted after an
+  entries.  On Fly.io (detected via the `FLY_MACHINE_ID` env var Fly sets
+  on every Machine), the peer is Fly's edge proxy and `Fly-Client-IP` —
+  which Fly's edge overwrites, so clients cannot forge it there — is used
+  instead; the env gate exists because outside Fly nothing strips that
+  header, so honoring it unconditionally would let anyone mint fresh
+  buckets.  A present-but-invalid `Fly-Client-IP` falls back to the peer
+  address.  `X-Real-IP` is never trusted.  Idle IPs are evicted after an
   hour (sweep above a 10 000-entry threshold) to bound memory under
   IP-spray abuse.
 - **Per-DID handle cap** (`porkbun.go`, `provision.go`) — one handle per DID
@@ -277,14 +289,19 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
 ## Deployment notes (not code)
 
 - **Porkbun keys must be scoped per domain** in production (dns scope,
-  single-domain allowlist) and installed as the per-domain pair under
-  `porkbun_keys/` (see Build & run).  The client selects each request's
-  key pair by the Host-resolved domain, so one community's key can never
-  touch another's zone.
-- **TLS terminates at Caddy**, which proxies to the service over localhost —
-  matching `isTrustedProxy` (trusted proxy = localhost), so
-  `X-Forwarded-For` handling works as written.  Caddy must forward the
-  original Host header, since domain selection depends on it.
+  single-domain allowlist) and delivered as the per-domain pair —
+  environment variables via `fly secrets set` (see Build & run) or the
+  `porkbun_keys/` files.  The client selects each request's key pair by
+  the Host-resolved domain, so one community's key can never touch
+  another's zone.
+- **Hosting is one Fly.io Machine per service.**  TLS terminates at Fly's
+  edge proxy, which forwards the original Host header (domain selection
+  depends on it) and sets `Fly-Client-IP` (see the rate-limiting bullet
+  in Defenses).  Machines autostop when idle; the reaper's timers freeze
+  while a Machine is suspended, which only delays sweeps — and delayed
+  reaps are the safe direction by design.  `reaper_state.json` lives on
+  the Machine rootfs and does not survive redeploys; losing it only
+  restarts grace clocks.
 
 ## Testing / linting
 
