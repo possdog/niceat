@@ -1,0 +1,8 @@
+# Whitelist: only the Go sources and module files enter the build context.
+# This doubles as a leak guard — instance files (niceat.json, Porkbun keys,
+# reaper_state.json) must never reach the daemon, even if their names change.
+*
+!go.mod
+!go.sum
+!cmd
+!cmd/**

@@ -1,0 +1,55 @@
+# fly.io deployment configuration for one niceat instance serving all managed
+# domains (domain selection is by Host header; each domain gets its own cert
+# and its own per-domain Porkbun credentials — see AGENTS.md).
+#
+# Operator sequence, in order:
+#   1. fly apps create <app-name>        (rename `app` below to match)
+#   2. fly secrets set NICEAT_CONFIG="$(base64 -i niceat.json)"
+#      (per Porkbun docs the [[files]] secret value is base64; on Linux use
+#      `base64 -w0` instead of `-i`)
+#   3. fly secrets set PORKBUN_<DOMAIN>_API_KEY=... PORKBUN_<DOMAIN>_SECRET_KEY=...
+#      for every managed domain
+#   4. fly deploy
+#   5. fly certs add <domain> for every managed domain, plus the A/AAAA/CNAME
+#      records the command prints
+#
+# NICEAT_CONFIG is injected as /app/niceat.json (the -config default) via the
+# [[files]] section below, so the config survives redeploys instead of living
+# on the ephemeral rootfs. Without it the deploy fails: `domains` is required.
+
+app = "niceat"
+primary_region = "iad"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Suspend (not stop) on idle: suspended Machines keep their rootfs, so the
+  # reaper's reaper_state.json survives idle periods and only redeploys reset
+  # its grace clocks — the safe direction by design.
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  # Liveness only: /healthz deliberately probes nothing external, so a
+  # Porkbun or plc.directory blip can never fail a deploy.
+  [http_service.checks]
+    grace_period = "10s"
+    interval = "30s"
+    timeout = "5s"
+    method = "get"
+    path = "/healthz"
+
+# Pin the Machine size so deploys don't fight `fly scale`: a single
+# shared-cpu-1x with the 256 MB default is ample for this workload.
+[vm]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+# The -config default (./niceat.json relative to the Dockerfile WORKDIR),
+# delivered as a secret: set NICEAT_CONFIG to the base64-encoded config JSON.
+[[files]]
+  guest_path = "/app/niceat.json"
+  secret_name = "NICEAT_CONFIG"

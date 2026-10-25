@@ -302,6 +302,29 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   reaps are the safe direction by design.  `reaper_state.json` lives on
   the Machine rootfs and does not survive redeploys; losing it only
   restarts grace clocks.
+- **Deployment artifacts** live at the repo root: `Dockerfile`
+  (multi-stage: `golang:1.26-alpine` build with `CGO_ENABLED=0`, then
+  `distroless/static:nonroot` runtime — distroless ships the CA
+  certificates the Porkbun client and the DID resolver need for TLS, and
+  its `/app` workdir is pre-created nonroot-owned so the reaper can write
+  its state file), `.dockerignore` (a whitelist that lets only
+  `go.mod`/`go.sum`/`cmd/` into the build context, so instance files and
+  Porkbun keys can never reach the daemon or the image), and `fly.toml`
+  (port 8080, `[http_service.checks]` on /healthz,
+  `auto_stop_machines = "suspend"` so the rootfs — and the grace clocks —
+  survive idle suspension, and a `[[files]]` entry injecting the config).
+- **The config reaches the Machine as a secret, not a file.**
+  `niceat.json` is gitignored and instance-specific, so `fly.toml` maps
+  it from a base64-encoded secret (`NICEAT_CONFIG`) to `/app/niceat.json`
+  via `[[files]]` — the file is re-injected on every deploy, unlike the
+  rootfs.  Deploy fails loudly if the secret is absent (`domains` is
+  required).  Operator sequence, in order: `fly apps create <name>` (then
+  rename `app` in fly.toml if needed) →
+  `fly secrets set NICEAT_CONFIG="$(base64 -i niceat.json)"` (Linux:
+  `base64 -w0`) → `fly secrets set PORKBUN_<DOMAIN>_API_KEY=…/_SECRET_KEY=…`
+  for every managed domain → `fly deploy` → `fly certs add <domain>` per
+  managed domain plus the DNS records it prints.  `primary_region` in
+  fly.toml is a placeholder to set before the first deploy.
 
 ## Testing / linting
 
