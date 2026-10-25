@@ -48,6 +48,12 @@ const (
 	// set the handle days later, short enough that a squatted label
 	// frees up within a month.
 	defaultReaperGrace = 30 * 24 * time.Hour
+	// reaperOnceDeadline caps a single -reap-once sweep.  Every network
+	// call has its own timeout, but the deadline is the backstop that
+	// guarantees the scheduled reaper Machine's process exits even under
+	// pathological conditions — that Machine's lifetime is exactly its
+	// process's lifetime, so a stuck sweep would be a stuck bill.
+	reaperOnceDeadline = 10 * time.Minute
 )
 
 // zoneCleaner is the DNS-backend surface the reaper needs: enumerate the
@@ -103,7 +109,11 @@ func (r *reaper) run(ctx context.Context, interval time.Duration) {
 }
 
 // sweep runs one pass over every managed zone and persists the grace state.
-func (r *reaper) sweep(ctx context.Context) {
+// It returns an error when any zone could not be listed or the state could
+// not be persisted — run() ignores it (the failures are already logged and
+// the next pass retries), while -reap-once uses it as its exit status so a
+// scheduled Machine run surfaces the failure.
+func (r *reaper) sweep(ctx context.Context) error {
 	state, err := loadReaperState(r.statePath)
 	if err != nil {
 		// A missing file is the normal first run; a corrupt one is
@@ -121,10 +131,12 @@ func (r *reaper) sweep(ctx context.Context) {
 	// clocks would silently restart grace for the whole zone.
 	seen := make(map[string]bool)
 	listed := make(map[string]bool, len(r.domains))
+	var failed []string
 	for _, domain := range r.domains {
 		records, err := r.cleaner.listAtproto(ctx, domain)
 		if err != nil {
 			log.Printf("ERROR: reaper could not list %s: %v", domain, err)
+			failed = append(failed, domain)
 			continue
 		}
 		listed[domain] = true
@@ -142,7 +154,12 @@ func (r *reaper) sweep(ctx context.Context) {
 
 	if err := saveReaperState(r.statePath, state); err != nil {
 		log.Printf("ERROR: reaper could not persist grace state: %v", err)
+		return fmt.Errorf("persist grace state: %w", err)
 	}
+	if len(failed) > 0 {
+		return fmt.Errorf("could not list: %s", strings.Join(failed, ", "))
+	}
+	return nil
 }
 
 // judge decides one record's fate and updates the grace state in place.

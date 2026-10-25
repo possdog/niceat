@@ -65,12 +65,16 @@ own Node stage (see Dockerfile), so deploys need no local artifact.
 Never edit it by hand — it is a 700 kB minified bundle.  See
 frontend/AGENTS.md for the frontend's own conventions.
 
-Only two flags exist.  `-config` defaults to `niceat.json` relative to the
+Three flags exist.  `-config` defaults to `niceat.json` relative to the
 current working directory, so a service manager just needs to set the
 working directory.  `-addr` overrides the config file's `addr` (useful when
 a host runs several services and ports are handed out dynamically, e.g.
 `-addr :0`); empty means "use the config".  Precedence:
-`-addr` flag > config `addr` > `:8080` default.
+`-addr` flag > config `addr` > `:8080` default.  `-reap-once` runs exactly
+one reaper sweep and exits without starting the HTTP server — the scheduled
+reaper Machine's mode (see Deployment notes); it overrides
+`reaper.enabled`, since creating that Machine is the enablement, and fails
+fast when no Porkbun credentials are configured.
 
 Porkbun credentials are **per domain** (mirroring production key scoping)
 and live in **one domain-keyed document**: `porkbun_keys.json` under the
@@ -281,8 +285,11 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   WriteTimeout 30s, IdleTimeout 2m on the `http.Server`, so a slowloris
   client cannot pin connections open indefinitely.
 - **Handle reaper** (`reaper.go`, `resolver.go`) — frees labels whose
-  accounts no longer use them.  A background task sweeps every managed
-  zone (default every 6h, plus once at startup), resolves each record's
+  accounts no longer use them.  Sweeps every managed zone (in-process:
+  every 6h plus once at startup; on Fly: one sweep per day via the
+  scheduled reaper Machine running `-reap-once` — see Deployment notes
+  for why sweeps must not depend on registration traffic), resolves
+  each record's
   DID (plc.directory for `did:plc`, the domain's `/.well-known/did.json`
   for `did:web`), and checks the DID document's `alsoKnownAs` for
   `at://<handle>` — the list of handles the account actually uses.  Only
@@ -312,14 +319,29 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   (see Build & run) or the `porkbun_keys.json` file.  The client selects
   each request's key pair by the Host-resolved domain, so one community's
   key can never touch another's zone.
-- **Hosting is one Fly.io Machine per service.**  TLS terminates at Fly's
-  edge proxy, which forwards the original Host header (domain selection
-  depends on it) and sets `Fly-Client-IP` (see the rate-limiting bullet
-  in Defenses).  Machines autostop when idle; the reaper's timers freeze
-  while a Machine is suspended, which only delays sweeps — and delayed
-  reaps are the safe direction by design.  `reaper_state.json` lives on
-  the Machine rootfs and does not survive redeploys; losing it only
-  restarts grace clocks.
+- **Hosting is one Fly.io app with two Machines: a serving Machine and a
+  scheduled reaper Machine.**  TLS terminates at Fly's edge proxy, which
+  forwards the original Host header (domain selection depends on it) and
+  sets `Fly-Client-IP` (see the rate-limiting bullet in Defenses).  The
+  serving Machine autostops (suspends) when idle — and runs with
+  `reaper.enabled = false`, because the reaper must not depend on
+  registration traffic: scale-to-zero means the serving Machine is asleep
+  most of the time, and the handles worth reaping live in exactly the
+  zones that have stopped generating it.  The reaper therefore runs on a
+  second, service-less Machine created with
+  `fly machines run <image> --schedule=daily --restart=no -a <app>`:
+  the Fly proxy manages no such Machine, so its lifetime is exactly the
+  process's lifetime — `niceat -reap-once` sweeps once (under a hard
+  10-minute wall-clock deadline backstop; every network call already has
+  its own timeout) and exits, which is what puts the Machine back to
+  sleep.  A crash just stops the Machine until the next schedule — no
+  crash loop, retry next day.  The reaper's state file lives on the
+  reaper Machine's rootfs, which survives the scheduled stop/start cycle
+  (losing it only restarts grace clocks); when `fly deploy` ships a new
+  image, recreate or update the reaper Machine too, since scheduled
+  Machines are not rebuilt by deploys.  Both Machines share the same
+  secrets; the same config serves both (`-reap-once` ignores
+  `reaper.enabled`).
 - **Deployment artifacts** live at the repo root: `Dockerfile`
   (multi-stage: a `node:24-alpine` stage runs `pnpm build` on the frontend —
   the artifact is not committed, so the image builds it from source with

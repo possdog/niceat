@@ -34,6 +34,13 @@ func main() {
 	// several services and ports are handed out dynamically (e.g. -addr
 	// :0 for an ephemeral port).  Empty means "use the config file".
 	addrOverride := flag.String("addr", "", "HTTP listen address; overrides the config file's \"addr\"")
+	// -reap-once runs exactly one reaper sweep and exits — no HTTP
+	// server.  This is how the reaper runs on Fly: a scheduled Machine
+	// (no services, so the proxy never auto-stops it) whose lifetime is
+	// exactly this process's lifetime; exiting is what puts the Machine
+	// back to sleep.  Overrides the config's reaper.enabled: creating
+	// the scheduled Machine is the enablement.
+	reapOnce := flag.Bool("reap-once", false, "run one reaper sweep and exit (no HTTP server)")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
@@ -64,9 +71,30 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// One-shot reaper mode: sweep once under a hard wall-clock deadline
+	// (on top of every call's own timeout) and exit — the exit status
+	// reports whether the sweep covered every zone, and exiting ends the
+	// scheduled Machine's billing.
+	if *reapOnce {
+		if !haveCreds {
+			log.Fatal("-reap-once requires Porkbun credentials")
+		}
+		deadlineCtx, cancelDeadline := context.WithTimeout(ctx, reaperOnceDeadline)
+		defer cancelDeadline()
+		rep := newReaper(cfg.Domains, backend.(*porkbunProvisioner), newPlcDirectory(""), reaperStateFile, cfg.reaperGrace)
+		if err := rep.sweep(deadlineCtx); err != nil {
+			log.Fatalf("reaper sweep: %v", err)
+		}
+		log.Println("reaper sweep complete")
+		return
+	}
+
 	// The handle reaper frees labels whose accounts no longer use them.
 	// It needs the real DNS backend (the in-memory one publishes
-	// nothing to sweep) and runs until shutdown; see reaper.go.
+	// nothing to sweep) and runs until shutdown; see reaper.go.  On
+	// Fly the serving Machine leaves this disabled (reaper.enabled =
+	// false in its config) and a separate scheduled Machine reaps via
+	// -reap-once instead.
 	if haveCreds && cfg.reaperEnabled {
 		rep := newReaper(cfg.Domains, backend.(*porkbunProvisioner), newPlcDirectory(""), reaperStateFile, cfg.reaperGrace)
 		go rep.run(ctx, cfg.reaperInterval)
