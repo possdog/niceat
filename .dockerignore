@@ -1,4 +1,4 @@
-# Whitelist: only the Go sources and module files enter the build context.
+# Whitelist: only the sources and module files enter the build context.
 # This doubles as a leak guard — instance files (niceat.json, Porkbun keys,
 # reaper_state.json) must never reach the daemon, even if their names change.
 *
@@ -6,3 +6,14 @@
 !go.sum
 !cmd
 !cmd/**
+!frontend
+!frontend/**
+# Re-ignored after the whitelist (last match wins): stale local build
+# outputs must not shadow what the image builds from source, and
+# node_modules would bloat the context.  cmd/niceat/web likewise holds
+# only the local pnpm build product — the image gets the artifact from
+# the frontend stage, never from the developer's tree.
+frontend/node_modules
+frontend/dist
+cmd/niceat/web
+

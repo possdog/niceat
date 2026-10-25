@@ -1,12 +1,27 @@
 # syntax=docker/dockerfile:1
 
-# Build stage. The frontend artifact (cmd/niceat/web/index.html) is committed,
-# so a plain go build suffices — no Node toolchain in the image chain.
+# Frontend stage. The Vite artifact (cmd/niceat/web/index.html) is a build
+# product, deliberately not committed, so the image builds it from source
+# here; the Go stage below embeds the result and needs no Node toolchain.
+FROM node:24-alpine AS frontend
+WORKDIR /src/frontend
+RUN npm install -g pnpm@12
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# --frozen-lockfile: the lockfile is the spec; a deploy build must never
+# quietly resolve newer versions than the ones the frontend was tested with.
+RUN pnpm install --frozen-lockfile
+COPY frontend ./
+# vite's outDir is ../cmd/niceat/web (vite.config.ts), so the artifact lands
+# exactly where the Go stage copies it from.
+RUN pnpm build
+
+# Build stage.
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
+COPY --from=frontend /src/cmd/niceat/web/index.html ./cmd/niceat/web/
 # CGO_ENABLED=0: the distroless runtime stage ships no libc, so the binary
 # must be static; -trimpath and -s -w shave it to a few MB.
 # /app is pre-created and chowned to nonroot (65532) because the runtime works

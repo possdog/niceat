@@ -15,8 +15,10 @@ server.
   `niceat.json` must list that domain).
 - `pnpm build` — produces the single-file build. The output lands at
   `../cmd/niceat/web/index.html` (not `dist/`) so the Go package's
-  `//go:embed` can reach it; see vite.config.ts. Commit the artifact: a
-  plain Go checkout must build without a Node toolchain.
+  `//go:embed` can reach it; see vite.config.ts. The artifact is a build
+  product, gitignored via `../cmd/niceat/.gitignore` — never commit it.
+  Any `go build`/`go test` needs it present, so build before working on
+  the Go side; the deploy image runs this same step in a Node stage.
 - `pnpm check` — svelte-check + tsc.
 
 Package manager: pnpm.

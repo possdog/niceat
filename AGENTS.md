@@ -46,15 +46,18 @@ directory; the file is instance-specific and gitignored:
   `"domain"` fails loudly instead of silently yielding an empty domain set.
 
 ```bash
-cd frontend && pnpm build   # regenerate cmd/niceat/web/index.html (see below)
+cd frontend && pnpm build   # generate cmd/niceat/web/index.html (see below)
 go build -o niceat ./cmd/niceat
 ./niceat                       # reads ./niceat.json, listens on config "addr"
 ./niceat -addr :8123           # same config, listen address overridden
 ```
 
-The frontend artifact `cmd/niceat/web/index.html` is committed so a plain
-Go checkout builds without a Node toolchain: regenerate it with
-`pnpm build` in `frontend/` after any frontend change and commit the result.
+The frontend artifact `cmd/niceat/web/index.html` is a build product,
+deliberately **not committed** (gitignored via `cmd/niceat/.gitignore`):
+`go build`, `go test`, and `go vet` all need it present, because `go:embed`
+in web.go fails loudly when it is missing.  Generate it with `pnpm build`
+in `frontend/` before any Go build; the deploy image does the same in its
+own Node stage (see Dockerfile), so deploys need no local artifact.
 Never edit it by hand — it is a 700 kB minified bundle.  See
 frontend/AGENTS.md for the frontend's own conventions.
 
@@ -168,7 +171,7 @@ cmd/niceat/
 ├── resolver.go    — DID document resolution (plc.directory / did:web well-known)
 ├── reaper.go      — background task: sweep zones, grace state file, delete unused
 ├── web.go         — go:embed of the built form page + serveIndex
-├── web/           — frontend build artifact (index.html), committed
+├── web/           — frontend build artifact (index.html), gitignored build product
 └── *_test.go      — tests alongside source, fakes in helpers_test.go / porkbun_test.go
 
 frontend/           — Svelte 5 + Bulma + Vite source; pnpm build emits cmd/niceat/web/index.html
@@ -210,9 +213,9 @@ the domain parameterization is **client-side** — the page reads
 equivalent on yeen.world) and posts the form same-origin, so the Host
 header carries the domain selection.  The server does no per-Host markup.
 
-The artifact is committed so `go build` works without a Node toolchain;
-regenerate with `pnpm build` in `frontend/` after any frontend change.
-For frontend-specific conventions (pnpm, Bulma-over-custom-CSS, no
+The artifact is gitignored (see Build & run): `go build` and the tests need
+it present, so run `pnpm build` in `frontend/` before working on the Go
+side.  For frontend-specific conventions (pnpm, Bulma-over-custom-CSS, no
 SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
 `/register` to a locally running Go server with the Host forced to
 `wagg.ing` (the dev niceat.json must list it).
@@ -303,13 +306,18 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   the Machine rootfs and does not survive redeploys; losing it only
   restarts grace clocks.
 - **Deployment artifacts** live at the repo root: `Dockerfile`
-  (multi-stage: `golang:1.26-alpine` build with `CGO_ENABLED=0`, then
-  `distroless/static:nonroot` runtime — distroless ships the CA
+  (multi-stage: a `node:24-alpine` stage runs `pnpm build` on the frontend —
+  the artifact is not committed, so the image builds it from source with
+  `--frozen-lockfile` — then a `golang:1.26-alpine` build with
+  `CGO_ENABLED=0`, then `distroless/static:nonroot` runtime — distroless
+  ships the CA
   certificates the Porkbun client and the DID resolver need for TLS, and
   its `/app` workdir is pre-created nonroot-owned so the reaper can write
   its state file), `.dockerignore` (a whitelist that lets only
-  `go.mod`/`go.sum`/`cmd/` into the build context, so instance files and
-  Porkbun keys can never reach the daemon or the image), and `fly.toml`
+  `go.mod`/`go.sum`/`cmd/`/`frontend/` into the build context, minus the
+  local `node_modules`/`dist`/`cmd/niceat/web` build products, so instance
+  files and Porkbun keys can never reach the daemon or the image), and
+  `fly.toml`
   (port 8080, `[http_service.checks]` on /healthz,
   `auto_stop_machines = "suspend"` so the rootfs — and the grace clocks —
   survive idle suspension, and a `[[files]]` entry injecting the config).

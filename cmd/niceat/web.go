@@ -10,8 +10,11 @@ import (
 // vite-plugin-singlefile into one self-contained page — all JavaScript and
 // CSS inlined — with its outDir pointed here (see frontend/vite.config.ts)
 // so go:embed, which cannot reach parent directories, can pick it up.  The
-// artifact is committed so a plain Go checkout builds without a Node
-// toolchain; regenerate it with `pnpm build` inside frontend/.
+// artifact is a build product, deliberately not committed (see
+// cmd/niceat/.gitignore): build it with `pnpm build` inside frontend/
+// before `go build` / `go test` — go:embed fails loudly when it is
+// missing — and the deploy image builds it in its own Node stage
+// (see Dockerfile).
 
 //go:embed web/index.html
 var indexHTML []byte
