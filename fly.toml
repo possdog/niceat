@@ -17,7 +17,7 @@
 # [[files]] section below, so the config survives redeploys instead of living
 # on the ephemeral rootfs. Without it the deploy fails: `domains` is required.
 
-app = "niceat"
+app = "possdog-niceat"
 primary_region = "iad"
 
 [build]
@@ -35,7 +35,7 @@ primary_region = "iad"
 
   # Liveness only: /healthz deliberately probes nothing external, so a
   # Porkbun or plc.directory blip can never fail a deploy.
-  [http_service.checks]
+  [[http_service.checks]]
     grace_period = "10s"
     interval = "30s"
     timeout = "5s"
