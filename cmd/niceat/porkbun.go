@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,11 +21,13 @@ import (
 const (
 	porkbunBaseURL = "https://api.porkbun.com/api/json/v3"
 	// Credentials are strictly per domain: production Porkbun keys are
-	// scoped (dns scope, single-domain allowlist), so the working
-	// directory holds one key pair per managed domain under
-	// porkbun_keys/.  There is deliberately no global fallback pair —
+	// scoped (dns scope, single-domain allowlist), so the credentials
+	// document maps each managed domain to its own key pair, in one
+	// place (porkbun_keys.json, or the PORKBUN_CREDENTIALS environment
+	// variable on Fly).  There is deliberately no global fallback pair —
 	// a shared pair would defeat the scoping's blast-radius containment.
-	porkbunKeysDir   = "porkbun_keys"
+	porkbunCredsFile = "porkbun_keys.json"
+	porkbunCredsEnv  = "PORKBUN_CREDENTIALS"
 	porkbunTimeout   = 10 * time.Second
 	porkbunRecordTTL = "300"
 	// porkbunDuplicateCode is Porkbun's machine-readable code for an exact
@@ -93,105 +96,125 @@ func newPorkbunProvisioner(creds map[string]porkbunCreds, baseURL string) *porkb
 	}
 }
 
-// porkbunEnvSuffix maps a domain to the <DOMAIN> part of its per-domain
-// credential environment variables: the domain uppercased with every '.'
-// and '-' mapped to '_' (e.g. wagg.ing -> WAGG_ING, a-b.example -> A_B_EXAMPLE).
-// Two distinct configured domains can collide on the same suffix
-// (a-b.c and a.b-c both become A_B_C); loadPorkbunCredentials refuses
-// such a configuration rather than letting the domains share a key pair,
-// which would defeat the per-domain scoping's blast-radius containment.
-func porkbunEnvSuffix(domain string) string {
-	return strings.ToUpper(strings.Map(func(r rune) rune {
-		if r == '.' || r == '-' {
-			return '_'
-		}
-		return r
-	}, domain))
+// porkbunCredsEntry is the JSON shape of one domain's entry in the
+// credentials document (porkbunCredsFile / porkbunCredsEnv).
+type porkbunCredsEntry struct {
+	APIKey    string `json:"api_key"`
+	SecretKey string `json:"secret_key"`
 }
 
-// loadPorkbunCredentials resolves one API key pair per managed domain.
-// For each domain it first checks the per-domain environment variables
-// PORKBUN_<DOMAIN>_API_KEY and PORKBUN_<DOMAIN>_SECRET_KEY (<DOMAIN> from
-// porkbunEnvSuffix), then falls back to the files
-// porkbun_keys/<domain>.api_key.txt and porkbun_keys/<domain>.secret_key.txt
-// under dir (the service working directory; the files are gitignored).
+// loadPorkbunCredentials resolves one API key pair per managed domain from
+// a single domain-keyed credentials document: an object mapping domain →
+// {api_key, secret_key}.  The document comes from the PORKBUN_CREDENTIALS
+// environment variable, or — when that is unset or empty — from
+// porkbun_keys.json under dir (the service working directory; the file is
+// gitignored).
 //
-// Environment variables win because that is Fly.io's secrets model
-// (fly secrets set): in production the credentials arrive as environment
-// variables, and a stale porkbun_keys/ file left over from local
+// The environment wins because that is Fly.io's secrets model
+// (fly secrets set): in production the credentials arrive as an
+// environment variable, and a stale porkbun_keys.json left over from local
 // development must not shadow what the operator set with fly secrets set.
-// Files remain the local-development path, where no secret manager exists.
-// Both sources are per domain, mirroring the per-domain scoping of
-// production Porkbun keys — there is deliberately no global fallback pair,
-// as a shared pair would defeat the scoping's blast-radius containment.
+// The file remains the local-development path, where no secret manager
+// exists.  Either way the document is per domain, mirroring the per-domain
+// scoping of production Porkbun keys — there is deliberately no global
+// fallback pair, as a shared pair would defeat the scoping's
+// blast-radius containment.
 //
-// An env value is trimmed like a file's content; an empty or
-// whitespace-only value counts as absent (treated as "not set", so a
-// both-empty pair falls through to the files).
+// Mapping keys are validated and normalized like configured domains
+// (parseDomain, lowercase, FQDN dot stripped), so an entry can be spelled
+// "WAGG.ING" or "wagg.ing." interchangeably.  An entry no configured domain
+// claims is a startup error naming it — with one document holding every
+// domain, such an entry is almost certainly a typo for a managed domain,
+// and silently ignoring it would leave the intended domain without keys.
 //
-// ok=false means no domain has a pair (from either source) and the caller
-// should fall back to the in-memory provisioner.  Anything in between is a
-// configuration error, not a fallback: a half-present pair (file or env
-// side), an empty key, a suffix collision, or pairs for some configured
-// domains but not others all fail loudly, because serving a domain whose
-// records could never actually be published would silently eat
-// registrations.
+// ok=false means no credentials exist at all (no env value, no file) and
+// the caller should fall back to the in-memory provisioner.  Anything in
+// between is a configuration error, not a fallback: a present-but-unparseable
+// document, a key value that is empty or whitespace-only, or a configured
+// domain missing from the document all fail loudly, because serving a
+// domain whose records could never actually be published would silently
+// eat registrations.
 func loadPorkbunCredentials(dir string, domains []string) (map[string]porkbunCreds, bool, error) {
-	// The suffix collision must be rejected before any variable is read:
-	// two domains sharing a suffix would otherwise silently share (and
-	// publish under) one key pair.
-	suffixOwner := make(map[string]string, len(domains))
-	for _, domain := range domains {
-		suffix := porkbunEnvSuffix(domain)
-		if prev, dup := suffixOwner[suffix]; dup {
-			return nil, false, fmt.Errorf("%s and %s map to the same PORKBUN_<DOMAIN> environment variable suffix (%s); give each domain its own variables", prev, domain, suffix)
+	envJSON := strings.TrimSpace(os.Getenv(porkbunCredsEnv))
+	if envJSON == "" {
+		b, err := os.ReadFile(filepath.Join(dir, porkbunCredsFile))
+		if errors.Is(err, fs.ErrNotExist) {
+			// No credentials anywhere: the caller falls back to the
+			// in-memory provisioner (local development only).
+			return nil, false, nil
+		} else if err != nil {
+			return nil, false, fmt.Errorf("read %s: %w", porkbunCredsFile, err)
 		}
-		suffixOwner[suffix] = domain
+		envJSON = string(b)
 	}
 
-	keysDir := filepath.Join(dir, porkbunKeysDir)
+	// Strict decode: an unknown field is a typo and must fail loudly,
+	// exactly like the main config.
+	var entries map[string]porkbunCredsEntry
+	dec := json.NewDecoder(strings.NewReader(envJSON))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&entries); err != nil {
+		return nil, false, fmt.Errorf("parse %s: %w", porkbunCredsSource(envJSON), err)
+	}
+
+	// Normalize the mapping keys and reject entries no configured domain
+	// claims (a typo would otherwise silently strand the intended domain).
+	byDomain := make(map[string]porkbunCredsEntry, len(entries))
+	normalized := make(map[string]string, len(entries)) // normalized key -> as written
+	for raw, entry := range entries {
+		d, err := parseDomain(raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("%s: invalid domain %q: %v", porkbunCredsSource(envJSON), raw, err)
+		}
+		if prev := normalized[d]; prev != "" && prev != raw {
+			return nil, false, fmt.Errorf("%s: %q and %q are the same domain after normalization", porkbunCredsSource(envJSON), prev, raw)
+		}
+		normalized[d] = raw
+
+		managed := false
+		for _, domain := range domains {
+			if domain == d {
+				managed = true
+				break
+			}
+		}
+		if !managed {
+			return nil, false, fmt.Errorf("%s: credentials for %q, which this instance does not manage (configured: %s)",
+				porkbunCredsSource(envJSON), raw, strings.Join(domains, ", "))
+		}
+		byDomain[d] = entry
+	}
+
 	creds := make(map[string]porkbunCreds, len(domains))
 	var missing []string
 	for _, domain := range domains {
-		suffix := porkbunEnvSuffix(domain)
-		apiEnv := strings.TrimSpace(os.Getenv("PORKBUN_" + suffix + "_API_KEY"))
-		secEnv := strings.TrimSpace(os.Getenv("PORKBUN_" + suffix + "_SECRET_KEY"))
-		switch {
-		case apiEnv != "" && secEnv != "":
-			// The operator set a full pair: it wins over any files
-			// for this domain (a stale file must not shadow what
-			// fly secrets set configured).
-			creds[domain] = porkbunCreds{apiKey: apiEnv, secretKey: secEnv}
-			continue
-		case apiEnv != "" || secEnv != "":
-			return nil, false, fmt.Errorf("%s: found only one of the PORKBUN_%s_API_KEY / PORKBUN_%s_SECRET_KEY pair; provide both or neither", domain, suffix, suffix)
-		}
-		// Neither env var is set: fall back to the file pair.
-		apiB, apiErr := os.ReadFile(filepath.Join(keysDir, domain+".api_key.txt"))
-		secB, secErr := os.ReadFile(filepath.Join(keysDir, domain+".secret_key.txt"))
-		if apiErr != nil && secErr != nil {
+		entry, ok := byDomain[domain]
+		if !ok {
 			missing = append(missing, domain)
 			continue
 		}
-		if apiErr != nil || secErr != nil {
-			return nil, false, fmt.Errorf("%s: found only one of the api_key / secret_key pair; provide both or neither", domain)
-		}
 		c := porkbunCreds{
-			apiKey:    strings.TrimSpace(string(apiB)),
-			secretKey: strings.TrimSpace(string(secB)),
+			apiKey:    strings.TrimSpace(entry.APIKey),
+			secretKey: strings.TrimSpace(entry.SecretKey),
 		}
 		if c.apiKey == "" || c.secretKey == "" {
-			return nil, false, fmt.Errorf("%s: api_key / secret_key are empty", domain)
+			return nil, false, fmt.Errorf("%s: api_key / secret_key for %s are empty", porkbunCredsSource(envJSON), domain)
 		}
 		creds[domain] = c
 	}
-	if len(creds) == 0 {
-		return nil, false, nil
-	}
-	if len(creds) < len(domains) {
-		return nil, false, fmt.Errorf("no Porkbun credentials for %s (checked PORKBUN_<DOMAIN>_* variables and %s/)", strings.Join(missing, ", "), porkbunKeysDir)
+	if len(missing) > 0 {
+		return nil, false, fmt.Errorf("%s: no credentials for %s", porkbunCredsSource(envJSON), strings.Join(missing, ", "))
 	}
 	return creds, true, nil
+}
+
+// porkbunCredsSource names where a credentials document came from, for
+// error messages: the environment variable or the file path.
+func porkbunCredsSource(envJSON string) string {
+	if strings.TrimSpace(os.Getenv(porkbunCredsEnv)) != "" {
+		return porkbunCredsEnv
+	}
+	return porkbunCredsFile
 }
 
 // pbEnvelope holds the fields of every Porkbun JSON response this client

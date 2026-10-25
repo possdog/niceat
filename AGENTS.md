@@ -72,25 +72,36 @@ a host runs several services and ports are handed out dynamically, e.g.
 `-addr :0`); empty means "use the config".  Precedence:
 `-addr` flag > config `addr` > `:8080` default.
 
-Porkbun credentials are **per domain** (mirroring production key scoping):
-`porkbun_keys/<domain>.api_key.txt` and `porkbun_keys/<domain>.secret_key.txt`
-under the working directory hold each managed domain's own key pair
-(gitignored; never commit, never hard-code them into source or logs).
-Pairs for every configured domain select the real Porkbun backend; with no
-pairs at all, the service falls back to `memoryProvisioner`
-(see provision.go) — same semantics, but nothing is published and state is
-lost on restart, so it must never front real traffic.  Pairs for some
-configured domains but not others, a half-present pair, or an empty key is
-a startup error naming the domain: a domain whose records could never be
-published must fail loudly, not silently eat registrations.  There is
-deliberately no global fallback pair — a shared pair would defeat the
-per-domain scoping's blast-radius containment.  Credentials can also come
-from environment variables, `PORKBUN_<DOMAIN>_API_KEY` /
-`PORKBUN_<DOMAIN>_SECRET_KEY` (domain uppercased, `.` and `-` → `_`; two
-domains mapping to one suffix is a startup error).  Env wins over files —
-that is Fly.io's secrets model (`fly secrets set`), and a stale local-dev
-file must not shadow what the operator set.  Current keys are
-sandbox (`pk1_sb_`/`sk1_sb_`, scoped to the sandbox account's one probe
+Porkbun credentials are **per domain** (mirroring production key scoping)
+and live in **one domain-keyed document**: `porkbun_keys.json` under the
+working directory maps each managed domain to its own key pair
+(gitignored; never commit, never hard-code them into source or logs):
+
+```json
+{
+  "wagg.ing":   {"api_key": "pk1_…", "secret_key": "sk1_…"},
+  "yeen.world": {"api_key": "pk1_…", "secret_key": "sk1_…"}
+}
+```
+
+A template lives at `porkbun_keys.example.json` — copy it to
+`porkbun_keys.json` and fill in the real keys.
+
+Credentials for every configured domain select the real Porkbun backend;
+with no credentials at all (no env value, no file), the service falls back
+to `memoryProvisioner` (see provision.go) — same semantics, but nothing is
+published and state is lost on restart, so it must never front real
+traffic.  A configured domain missing from the document, an empty key, an
+entry for a domain this instance does not manage, or a document that fails
+to parse (unknown fields are rejected, as in the main config) is a startup
+error naming the domain: a domain whose records could never be published
+must fail loudly, not silently eat registrations.  There is deliberately no
+global fallback pair — a shared pair would defeat the per-domain scoping's
+blast-radius containment.  The same document can instead come from the
+environment variable `PORKBUN_CREDENTIALS` (the Fly.io path).  Env wins
+over the file — that is Fly.io's secrets model (`fly secrets set`), and a
+stale local-dev file must not shadow what the operator set.  Current keys
+are sandbox (`pk1_sb_`/`sk1_sb_`, scoped to the sandbox account's one probe
 domain): Porkbun requests are simulated, so live smoke tests are safe.
 
 ## The API (what exists today)
@@ -296,11 +307,11 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
 ## Deployment notes (not code)
 
 - **Porkbun keys must be scoped per domain** in production (dns scope,
-  single-domain allowlist) and delivered as the per-domain pair —
-  environment variables via `fly secrets set` (see Build & run) or the
-  `porkbun_keys/` files.  The client selects each request's key pair by
-  the Host-resolved domain, so one community's key can never touch
-  another's zone.
+  single-domain allowlist) and delivered as one domain-keyed document —
+  the `PORKBUN_CREDENTIALS` environment variable via `fly secrets set`
+  (see Build & run) or the `porkbun_keys.json` file.  The client selects
+  each request's key pair by the Host-resolved domain, so one community's
+  key can never touch another's zone.
 - **Hosting is one Fly.io Machine per service.**  TLS terminates at Fly's
   edge proxy, which forwards the original Host header (domain selection
   depends on it) and sets `Fly-Client-IP` (see the rate-limiting bullet
@@ -333,8 +344,9 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   required).  Operator sequence, in order: `fly apps create <name>` (then
   rename `app` in fly.toml if needed) →
   `fly secrets set NICEAT_CONFIG="$(base64 -i niceat.json)"` (Linux:
-  `base64 -w0`) → `fly secrets set PORKBUN_<DOMAIN>_API_KEY=…/_SECRET_KEY=…`
-  for every managed domain → `fly deploy` → `fly certs add <domain>` per
+  `base64 -w0`) →
+  `fly secrets set PORKBUN_CREDENTIALS="$(cat porkbun_keys.json)"` →
+  `fly deploy` → `fly certs add <domain>` per
   managed domain plus the DNS records it prints.  `primary_region` in
   fly.toml is a placeholder to set before the first deploy.
 

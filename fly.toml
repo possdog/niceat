@@ -7,8 +7,8 @@
 #   2. fly secrets set NICEAT_CONFIG="$(base64 -i niceat.json)"
 #      (per Porkbun docs the [[files]] secret value is base64; on Linux use
 #      `base64 -w0` instead of `-i`)
-#   3. fly secrets set PORKBUN_<DOMAIN>_API_KEY=... PORKBUN_<DOMAIN>_SECRET_KEY=...
-#      for every managed domain
+#   3. fly secrets set PORKBUN_CREDENTIALS="$(cat porkbun_keys.json)"
+#      (one JSON document mapping each managed domain to its key pair)
 #   4. fly deploy
 #   5. fly certs add <domain> for every managed domain, plus the A/AAAA/CNAME
 #      records the command prints

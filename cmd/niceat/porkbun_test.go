@@ -408,23 +408,26 @@ func TestPorkbunNoCredentialsForDomain(t *testing.T) {
 }
 
 func TestLoadPorkbunCredentials(t *testing.T) {
-	write := func(t *testing.T, dir, domain, name, content string) {
+	// write places a credentials document in dir's porkbun_keys.json.
+	write := func(t *testing.T, dir, content string) {
 		t.Helper()
-		if err := os.MkdirAll(filepath.Join(dir, porkbunKeysDir), 0700); err != nil {
-			t.Fatalf("creating %s: %v", porkbunKeysDir, err)
+		if err := os.WriteFile(filepath.Join(dir, porkbunCredsFile), []byte(content), 0600); err != nil {
+			t.Fatalf("writing %s: %v", porkbunCredsFile, err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, porkbunKeysDir, domain+"."+name+".txt"), []byte(content), 0600); err != nil {
-			t.Fatalf("writing %s.%s: %v", domain, name, err)
-		}
+	}
+	// envDoc sets PORKBUN_CREDENTIALS to a credentials document.
+	envDoc := func(t *testing.T, content string) {
+		t.Helper()
+		t.Setenv(porkbunCredsEnv, content)
 	}
 	domains := []string{"wagg.ing", "yeen.world"}
 
 	t.Run("all domains have pairs", func(t *testing.T) {
 		dir := t.TempDir()
-		write(t, dir, "wagg.ing", "api_key", "pk1_a\n")
-		write(t, dir, "wagg.ing", "secret_key", "sk1_a\n")
-		write(t, dir, "yeen.world", "api_key", "pk1_b")
-		write(t, dir, "yeen.world", "secret_key", "sk1_b")
+		write(t, dir, `{
+			"wagg.ing":   {"api_key": "pk1_a\n", "secret_key": "sk1_a\n"},
+			"yeen.world": {"api_key": "pk1_b", "secret_key": "sk1_b"}
+		}`)
 		creds, ok, err := loadPorkbunCredentials(dir, domains)
 		if err != nil || !ok {
 			t.Fatalf("expected ok, got ok=%v err=%v", ok, err)
@@ -455,8 +458,7 @@ func TestLoadPorkbunCredentials(t *testing.T) {
 		// deployment: the unprovisionable domains would silently eat
 		// registrations, so it must fail loudly.
 		dir := t.TempDir()
-		write(t, dir, "wagg.ing", "api_key", "pk1_a")
-		write(t, dir, "wagg.ing", "secret_key", "sk1_a")
+		write(t, dir, `{"wagg.ing": {"api_key": "pk1_a", "secret_key": "sk1_a"}}`)
 		_, ok, err := loadPorkbunCredentials(dir, domains)
 		if err == nil || ok {
 			t.Fatalf("expected an error naming the missing domain, got ok=%v err=%v", ok, err)
@@ -466,48 +468,93 @@ func TestLoadPorkbunCredentials(t *testing.T) {
 		}
 	})
 
-	t.Run("half pair", func(t *testing.T) {
-		dir := t.TempDir()
-		write(t, dir, "wagg.ing", "api_key", "pk1_a")
-		_, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
-		if err == nil || ok {
-			t.Fatalf("expected an error for a half-present pair, got ok=%v err=%v", ok, err)
-		}
-	})
-
 	t.Run("empty key", func(t *testing.T) {
 		dir := t.TempDir()
-		write(t, dir, "wagg.ing", "api_key", "  \n")
-		write(t, dir, "wagg.ing", "secret_key", "sk1_a")
+		write(t, dir, `{"wagg.ing": {"api_key": "  \n", "secret_key": "sk1_a"}}`)
 		_, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
 		if err == nil || ok {
 			t.Fatalf("expected an error for empty credentials, got ok=%v err=%v", ok, err)
 		}
 	})
 
-	t.Run("unconfigured domain files ignored", func(t *testing.T) {
-		// Only configured domains are consulted: a pair for a domain
-		// this instance does not manage must not resurrect it or
-		// block the credential-less fallback.
+	t.Run("unconfigured domain entry refused", func(t *testing.T) {
+		// One document holds every domain, so an entry no configured
+		// domain claims is almost certainly a typo for a managed one;
+		// silently ignoring it would strand the intended domain.
 		dir := t.TempDir()
-		write(t, dir, "unmanaged.example", "api_key", "pk1_x")
-		write(t, dir, "unmanaged.example", "secret_key", "sk1_x")
+		write(t, dir, `{
+			"wagg.ing":          {"api_key": "pk1_a", "secret_key": "sk1_a"},
+			"yeen.world":        {"api_key": "pk1_b", "secret_key": "sk1_b"},
+			"unmanaged.example": {"api_key": "pk1_x", "secret_key": "sk1_x"}
+		}`)
 		_, ok, err := loadPorkbunCredentials(dir, domains)
-		if err != nil {
-			t.Fatalf("unmanaged pair must be ignored: %v", err)
+		if err == nil || ok {
+			t.Fatalf("expected an error for the unmanaged entry, got ok=%v err=%v", ok, err)
 		}
-		if ok {
-			t.Fatal("expected ok=false when no managed domain has a pair")
+		if !strings.Contains(err.Error(), "unmanaged.example") {
+			t.Fatalf("error should name the unmanaged domain, got: %v", err)
+		}
+	})
+
+	t.Run("invalid document", func(t *testing.T) {
+		// Malformed JSON and unknown fields (typos) both fail loudly,
+		// mirroring the strict parse of niceat.json.
+		for name, doc := range map[string]string{
+			"not JSON":      "{",
+			"unknown field": `{"wagg.ing": {"api_key": "pk1_a", "secret": "sk1_a"}}`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				write(t, dir, doc)
+				_, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
+				if err == nil || ok {
+					t.Fatalf("expected an error for %s, got ok=%v err=%v", name, ok, err)
+				}
+			})
+		}
+	})
+
+	t.Run("keys are normalized like configured domains", func(t *testing.T) {
+		// "WAGG.ING" and "yeen.world." denote the same domains as the
+		// normalized configured entries.
+		dir := t.TempDir()
+		write(t, dir, `{
+			"WAGG.ING":    {"api_key": "pk1_a", "secret_key": "sk1_a"},
+			"yeen.world.": {"api_key": "pk1_b", "secret_key": "sk1_b"}
+		}`)
+		creds, ok, err := loadPorkbunCredentials(dir, domains)
+		if err != nil || !ok {
+			t.Fatalf("expected ok, got ok=%v err=%v", ok, err)
+		}
+		if want := (porkbunCreds{apiKey: "pk1_a", secretKey: "sk1_a"}); creds["wagg.ing"] != want {
+			t.Fatalf("creds for wagg.ing = %+v, want %+v", creds["wagg.ing"], want)
+		}
+		if want := (porkbunCreds{apiKey: "pk1_b", secretKey: "sk1_b"}); creds["yeen.world"] != want {
+			t.Fatalf("creds for yeen.world = %+v, want %+v", creds["yeen.world"], want)
+		}
+	})
+
+	t.Run("duplicate after normalization", func(t *testing.T) {
+		// JSON keys are case-sensitive, so two spellings of one domain
+		// can coexist; they must not silently pick one.
+		dir := t.TempDir()
+		write(t, dir, `{
+			"wagg.ing":  {"api_key": "pk1_a", "secret_key": "sk1_a"},
+			"WAGG.ING":  {"api_key": "pk1_z", "secret_key": "sk1_z"}
+		}`)
+		_, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
+		if err == nil || ok {
+			t.Fatalf("expected an error for duplicate spellings, got ok=%v err=%v", ok, err)
 		}
 	})
 
 	t.Run("env credentials", func(t *testing.T) {
-		// Fly.io's secrets model is environment variables: a full pair
-		// per domain must be accepted with no files present at all.
-		t.Setenv("PORKBUN_WAGG_ING_API_KEY", "  pk1_env\n")
-		t.Setenv("PORKBUN_WAGG_ING_SECRET_KEY", "sk1_env")
-		t.Setenv("PORKBUN_YEEN_WORLD_API_KEY", "pk1_env2")
-		t.Setenv("PORKBUN_YEEN_WORLD_SECRET_KEY", "sk1_env2")
+		// Fly.io's secrets model is environment variables: one document
+		// covering every domain must be accepted with no files present.
+		envDoc(t, `{
+			"wagg.ing":   {"api_key": "  pk1_env\n", "secret_key": "sk1_env"},
+			"yeen.world": {"api_key": "pk1_env2", "secret_key": "sk1_env2"}
+		}`)
 		creds, ok, err := loadPorkbunCredentials(t.TempDir(), domains)
 		if err != nil || !ok {
 			t.Fatalf("expected ok, got ok=%v err=%v", ok, err)
@@ -528,10 +575,8 @@ func TestLoadPorkbunCredentials(t *testing.T) {
 		// A stale file from local development must not shadow what the
 		// operator set with fly secrets set.
 		dir := t.TempDir()
-		write(t, dir, "wagg.ing", "api_key", "pk1_file")
-		write(t, dir, "wagg.ing", "secret_key", "sk1_file")
-		t.Setenv("PORKBUN_WAGG_ING_API_KEY", "pk1_env")
-		t.Setenv("PORKBUN_WAGG_ING_SECRET_KEY", "sk1_env")
+		write(t, dir, `{"wagg.ing": {"api_key": "pk1_file", "secret_key": "sk1_file"}}`)
+		envDoc(t, `{"wagg.ing": {"api_key": "pk1_env", "secret_key": "sk1_env"}}`)
 		creds, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
 		if err != nil || !ok {
 			t.Fatalf("expected ok, got ok=%v err=%v", ok, err)
@@ -541,43 +586,15 @@ func TestLoadPorkbunCredentials(t *testing.T) {
 		}
 	})
 
-	t.Run("half env pair", func(t *testing.T) {
-		t.Setenv("PORKBUN_WAGG_ING_API_KEY", "pk1_env")
-		_, ok, err := loadPorkbunCredentials(t.TempDir(), []string{"wagg.ing"})
-		if err == nil || ok {
-			t.Fatalf("expected an error for a half-present env pair, got ok=%v err=%v", ok, err)
-		}
-		if !strings.Contains(err.Error(), "wagg.ing") {
-			t.Fatalf("error should name the domain, got: %v", err)
-		}
-	})
-
-	t.Run("env suffix collision", func(t *testing.T) {
-		// a-b.c and a.b-c both map to A_B_C: two configured domains
-		// silently sharing one key pair would defeat the per-domain
-		// scoping's blast-radius containment.
-		_, ok, err := loadPorkbunCredentials(t.TempDir(), []string{"a-b.c", "a.b-c"})
-		if err == nil || ok {
-			t.Fatalf("expected an error for colliding env suffixes, got ok=%v err=%v", ok, err)
-		}
-		for _, domain := range []string{"a-b.c", "a.b-c"} {
-			if !strings.Contains(err.Error(), domain) {
-				t.Fatalf("error should name %q, got: %v", domain, err)
-			}
-		}
-	})
-
 	t.Run("empty env falls back to files", func(t *testing.T) {
 		// An env value that is empty or whitespace-only counts as
-		// absent, so the domain's file pair is used.
+		// absent, so the file document is used.
 		dir := t.TempDir()
-		write(t, dir, "wagg.ing", "api_key", "pk1_file")
-		write(t, dir, "wagg.ing", "secret_key", "sk1_file")
-		t.Setenv("PORKBUN_WAGG_ING_API_KEY", "")
-		t.Setenv("PORKBUN_WAGG_ING_SECRET_KEY", "  \n")
+		write(t, dir, `{"wagg.ing": {"api_key": "pk1_file", "secret_key": "sk1_file"}}`)
+		t.Setenv(porkbunCredsEnv, "  \n")
 		creds, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
 		if err != nil || !ok {
-			t.Fatalf("expected ok from the file pair, got ok=%v err=%v", ok, err)
+			t.Fatalf("expected ok from the file document, got ok=%v err=%v", ok, err)
 		}
 		if want := (porkbunCreds{apiKey: "pk1_file", secretKey: "sk1_file"}); creds["wagg.ing"] != want {
 			t.Fatalf("creds = %+v, want the file pair %+v", creds["wagg.ing"], want)
