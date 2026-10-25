@@ -138,17 +138,127 @@ func TestResolveWebWellKnown(t *testing.T) {
 	}
 }
 
-func TestResolveWebWithPathUnsupported(t *testing.T) {
-	// did:web with path segments cannot be verified; the reaper must
-	// never reap such a record, and an error is the inconclusive signal.
-	d, _ := newTestDirectory(t, map[string][]string{})
+// newTestWebHost stands up the did:web half of the test rig: a TLS server
+// (did:web resolution is always HTTPS per the spec) and a resolver whose
+// client skips certificate verification for the self-signed test cert
+// only; production resolution never does.  Returns the resolver and the
+// server's host[:port] for building DIDs.  The caller supplies the
+// handler, which must serve the document at the path the did:web mapping
+// prescribes.
+func newTestWebHost(t *testing.T, handler http.HandlerFunc) (*plcDirectory, string) {
+	t.Helper()
+	srv := httptest.NewTLSServer(handler)
+	t.Cleanup(srv.Close)
+	d := newPlcDirectory("")
+	d.hc = &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+	return d, strings.TrimPrefix(srv.URL, "https://")
+}
+
+func TestResolveWebWithPathSegments(t *testing.T) {
+	// Per the did:web spec, did:web:host:users:alice resolves to
+	// https://host/users/alice/did.json (each colon after the host
+	// becomes one path segment; only the root form uses /.well-known).
+	d, host := newTestWebHost(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/users/alice/did.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "did:web:" + r.Host + ":users:alice",
+			"alsoKnownAs": []string{"at://alice.example.com"},
+		})
+	})
+	did := "did:web:" + host + ":users:alice"
+	aka, registered, err := d.resolve(context.Background(), did)
+	if err != nil || !registered {
+		t.Fatalf("resolve: registered=%v err=%v", registered, err)
+	}
+	if !akaHasHandle(aka, "alice.example.com") {
+		t.Fatalf("expected aka to contain alice.example.com, got %v", aka)
+	}
+}
+
+func TestResolveWebPercentEncodedPort(t *testing.T) {
+	// The did:web spec: a port colon in the identifier MUST be
+	// percent-encoded ("did:web:example.com%3A3000"), and resolution
+	// percent-decodes it back into the URL's host.  The test server
+	// listens on the loopback, so the identifier is built around
+	// 127.0.0.1 — the resolver's job is only the mapping, not the
+	// spec's issuer-side "no IP addresses" rule.
+	d, host := newTestWebHost(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/did.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "did:web:" + strings.Replace(r.Host, ":", "%3A", 1),
+			"alsoKnownAs": []string{"at://port.example.com"},
+		})
+	})
+	_, port, _ := strings.Cut(host, ":")
+	did := "did:web:127.0.0.1%3A" + port
+	aka, registered, err := d.resolve(context.Background(), did)
+	if err != nil || !registered {
+		t.Fatalf("resolve: registered=%v err=%v", registered, err)
+	}
+	if !akaHasHandle(aka, "port.example.com") {
+		t.Fatalf("expected aka to contain port.example.com, got %v", aka)
+	}
+}
+
+func TestResolveWebRefusesHostileSegments(t *testing.T) {
+	// Segments that would build a URL with path traversal or a path
+	// other than the spec mapping are unverifiable (error), never
+	// best-effort resolved; an error is the reaper's inconclusive signal.
+	d, _ := newTestWebHost(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "did:web:anything"})
+	})
 	for _, did := range []string{
-		"did:web:example.com:users:alice", // spec form: colon-separated
-		"did:web:example.com/users",       // literal slash
+		"did:web:example.com/users",         // literal slash in the host
+		"did:web:example.com:users%2Fx",     // encoded slash inside a segment
+		"did:web:example.com:users:.",       // dot segment
+		"did:web:example.com:users:..",      // traversal segment
+		"did:web:example.com:users:",        // empty segment
+		"did:web:example.com%2F..%2F..%2Fx", // encoded traversal in the host
 	} {
 		if _, _, err := d.resolve(context.Background(), did); err == nil {
 			t.Fatalf("expected an error for %s", did)
 		}
+	}
+}
+
+func TestResolveWebPathIDMismatchIsError(t *testing.T) {
+	// The id-mismatch check applies to path-segment documents too: a
+	// document answering for a different DID is inconclusive — never a
+	// basis for reaping.
+	d, host := newTestWebHost(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/users/alice/did.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "did:web:" + r.Host + ":users:bob",
+			"alsoKnownAs": []string{"at://alice.example.com"},
+		})
+	})
+	if _, _, err := d.resolve(context.Background(), "did:web:"+host+":users:alice"); err == nil {
+		t.Fatal("expected an error for a path-form document whose id does not match")
+	}
+}
+
+func TestResolveWebPath404IsUnregistered(t *testing.T) {
+	// A 404 from a path-form document location is affirmative: the
+	// account is gone, so such a record can now be reaped.
+	d, _ := newTestWebHost(t, http.NotFound)
+	_, registered, err := d.resolve(context.Background(), "did:web:example.com:users:alice")
+	if err != nil {
+		t.Fatalf("a 404 must not be an error, got %v", err)
+	}
+	if registered {
+		t.Fatal("expected registered=false for a 404")
 	}
 }
 

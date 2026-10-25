@@ -172,7 +172,13 @@ spec (atproto.com/specs/handle), the reference implementation
 - **DID** accepts only `did:plc` (24 chars `[a-z2-7]`) and `did:web` (pchar
   charset), max 200 bytes.  Tight per-method regexes guarantee the DID
   cannot inject extra content into the `did=<DID>` TXT record value.  DIDs
-  are case-sensitive and are never normalized.
+  are case-sensitive and are never normalized.  Path-segment `did:web` DIDs
+  (e.g. `did:web:example.com:users:alice`) are accepted and resolved per the
+  did:web spec (host, optionally with a percent-encoded port; colon-separated
+  segments become URL path segments; `/.well-known/did.json` only for the
+  root form), so the reaper can judge records bound to them; identifiers
+  that would map to a traversal or non-spec URL are unverifiable (reaper
+  skips, never reaps on an error).
 
 ## Architecture
 
@@ -187,7 +193,7 @@ cmd/niceat/
 ├── ratelimit.go   — per-IP token bucket middleware
 ├── provision.go   — provisioner interface + outcomes, memoryProvisioner
 ├── porkbun.go     — Porkbun client: zone listing, per-DID cap, create, reaper primitives
-├── resolver.go    — DID document resolution (plc.directory / did:web well-known)
+├── resolver.go    — DID document resolution (plc.directory / did:web spec mapping)
 ├── reaper.go      — background task: sweep zones, grace markers, delete unused
 ├── web.go         — go:embed of the built form page + serveIndex
 ├── web/           — frontend build artifact (index.html), gitignored build product
@@ -291,8 +297,10 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   scheduled reaper Machine running `-reap-once` — see Deployment notes
   for why sweeps must not depend on registration traffic), resolves
   each record's
-  DID (plc.directory for `did:plc`, the domain's `/.well-known/did.json`
-  for `did:web`), and checks the DID document's `alsoKnownAs` for
+  DID (plc.directory for `did:plc`, the DID's own domain per the did:web
+  spec for `did:web` — root form at `/.well-known/did.json`, path-segment
+  forms at `<path>/did.json` with a percent-encoded port decoded), and
+  checks the DID document's `alsoKnownAs` for
   `at://<handle>` — the list of handles the account actually uses.  Only
   AFFIRMATIVE evidence counts: a directory 404 means the account is gone;
   a network error or an unverifiable DID means skip and retry next pass.
@@ -386,6 +394,7 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
 
 ```bash
 go test -count=1 -v ./cmd/niceat/   # full run
+go test -race -count=1 ./cmd/niceat/   # with the race detector; passes, use it after concurrency-touching changes
 go test -count=1 -run TestValidateDID ./cmd/niceat/   # subset
 go vet ./cmd/niceat/
 gofmt -l .   # must print nothing

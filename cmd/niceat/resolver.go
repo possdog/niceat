@@ -41,7 +41,8 @@ type didResolver interface {
 }
 
 // plcDirectory resolves DIDs the way Bluesky itself does: did:plc through
-// plc.directory, did:web through the domain's /.well-known/did.json.
+// plc.directory, did:web through the DID's own domain per the did:web spec
+// (see webDocumentURL).
 type plcDirectory struct {
 	baseURL string
 	hc      *http.Client
@@ -68,21 +69,95 @@ func (d *plcDirectory) resolve(ctx context.Context, did string) ([]string, bool,
 	case strings.HasPrefix(did, "did:plc:"):
 		return d.fetchDocument(ctx, d.baseURL+"/"+did, did)
 	case strings.HasPrefix(did, "did:web:"):
-		host := strings.TrimPrefix(did, "did:web:")
-		// Only root-DID documents (a bare host) are verified.  Per the
-		// did:web spec, DIDs with path segments (colon- or
-		// slash-separated) serve their document deeper in the tree;
-		// those are vanishingly rare for Bluesky accounts, and treating
-		// them as unverifiable (never reaped) is the safe default.
-		// url.Parse rejects path-splattered or bad-port hosts.
-		u, err := url.Parse("https://" + host + "/.well-known/did.json")
-		if err != nil || u.Host != host || u.Path != "/.well-known/did.json" {
-			return nil, false, fmt.Errorf("did:web with path segments is not supported")
+		u, err := webDocumentURL(did)
+		if err != nil {
+			return nil, false, err
 		}
-		return d.fetchDocument(ctx, u.String(), did)
+		return d.fetchDocument(ctx, u, did)
 	default:
 		return nil, false, fmt.Errorf("unsupported DID method")
 	}
+}
+
+// webDocumentURL maps a did:web DID to its document URL per the did:web
+// spec (https://w3c-ccg.github.io/did-method-web/): the first
+// colon-separated segment of the method-specific identifier is the host
+// (an optional port colon is percent-encoded, e.g. %3A8443), each further
+// segment becomes one URL path segment, and the document lives at
+// <path>/did.json — /.well-known/did.json only for the root form.
+//
+// Hostile identifiers are errors, never best-effort mappings: a segment
+// that decodes to empty, ".", "..", or contains "/" could otherwise build
+// a URL with path traversal or a path other than the spec mapping, and a
+// resolver error is the fail-safe inconclusive signal (the reaper skips,
+// it never reaps on an error).  The same goes for percent-decode
+// failures — a malformed identifier is not something to guess at.  The
+// url.Parse backstop re-checks the finally-constructed URL against the
+// mapping, so characters that change URL meaning (raw "?" or "#", a host
+// that decodes with a "/" in it) are caught even though the per-segment
+// checks above look only at decoded content.
+func webDocumentURL(did string) (string, error) {
+	remainder := strings.TrimPrefix(did, "did:web:")
+	if remainder == "" {
+		return "", fmt.Errorf("empty did:web identifier")
+	}
+	segs := strings.Split(remainder, ":")
+	hostSegs := 1
+	// The spec wants the port colon percent-encoded (%3A), but a raw
+	// all-digit segment right after the host has always parsed as a
+	// port here (url.Parse reads "host:123" as host:port), and the
+	// pre-existing validate/resolver behavior and tests rely on that.
+	// Keep it: treating such a segment as a path would silently change
+	// root-form behavior.
+	if len(segs) > 1 && isASCIIDigits(segs[1]) {
+		hostSegs = 2
+	}
+	host, err := url.PathUnescape(strings.Join(segs[:hostSegs], ":"))
+	if err != nil || host == "" {
+		return "", fmt.Errorf("invalid did:web host %q", strings.Join(segs[:hostSegs], ":"))
+	}
+	// The backstop compares the parsed URL's path against the fully
+	// decoded mapping, so keep the decoded segments for that check while
+	// the URL itself is built from the identifier's raw (still-encoded)
+	// segments — re-encoding a decoded segment would be ambiguous about
+	// literal "%" characters.
+	decoded := make([]string, 0, len(segs)-hostSegs)
+	for _, seg := range segs[hostSegs:] {
+		dec, err := url.PathUnescape(seg)
+		if err != nil {
+			return "", fmt.Errorf("invalid did:web path segment %q", seg)
+		}
+		// "." and ".." are traversal, "" and anything with "/" would
+		// change the path shape the spec prescribes; refuse all of them.
+		if dec == "" || dec == "." || dec == ".." || strings.Contains(dec, "/") {
+			return "", fmt.Errorf("did:web path segment %q is not a usable path element", seg)
+		}
+		decoded = append(decoded, dec)
+	}
+	want := "/.well-known"
+	rawPath := "/.well-known"
+	if len(decoded) > 0 {
+		want = "/" + strings.Join(decoded, "/")
+		rawPath = "/" + strings.Join(segs[hostSegs:], "/")
+	}
+	u, err := url.Parse("https://" + host + rawPath + "/did.json")
+	if err != nil || u.Host != host || u.Path != want+"/did.json" {
+		return "", fmt.Errorf("did:web identifier %q does not map to a well-formed document URL", did)
+	}
+	return u.String(), nil
+}
+
+// isASCIIDigits reports whether s is non-empty and all ASCII digits.
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchDocument retrieves and validates the DID document at url, returning
