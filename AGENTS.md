@@ -328,20 +328,21 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   registration traffic: scale-to-zero means the serving Machine is asleep
   most of the time, and the handles worth reaping live in exactly the
   zones that have stopped generating it.  The reaper therefore runs on a
-  second, service-less Machine created with
-  `fly machines run <image> --schedule=daily --restart=no -a <app>`:
-  the Fly proxy manages no such Machine, so its lifetime is exactly the
-  process's lifetime — `niceat -reap-once` sweeps once (under a hard
-  10-minute wall-clock deadline backstop; every network call already has
-  its own timeout) and exits, which is what puts the Machine back to
-  sleep.  A crash just stops the Machine until the next schedule — no
-  crash loop, retry next day.  The reaper's state file lives on the
-  reaper Machine's rootfs, which survives the scheduled stop/start cycle
-  (losing it only restarts grace clocks); when `fly deploy` ships a new
-  image, recreate or update the reaper Machine too, since scheduled
-  Machines are not rebuilt by deploys.  Both Machines share the same
-  secrets; the same config serves both (`-reap-once` ignores
-  `reaper.enabled`).
+  second, service-less Machine: the Fly proxy manages no such Machine,
+  so its lifetime is exactly the process's lifetime — `niceat
+  -reap-once` sweeps once (under a hard 10-minute wall-clock deadline
+  backstop; every network call already has its own timeout) and exits,
+  which is what puts the Machine back to sleep.  A crash just stops the
+  Machine until the next schedule — no crash loop, retry next day.  The
+  reaper's state file lives on the reaper Machine's rootfs, which
+  survives the scheduled stop/start cycle (losing it only restarts
+  grace clocks).  Both Machines share the same secrets; the same config
+  serves both (`-reap-once` ignores `reaper.enabled`).  Routine deploys
+  — secrets sync, serving Machine, and a reaper Machine recreated on
+  the latest released image — are one command: `./deploy.sh`.  The
+  reaper Machine carries metadata `fly_process_group=reaper` (what
+  flyctl displays as its process group) so deploy.sh can find and
+  replace it.
 - **Deployment artifacts** live at the repo root: `Dockerfile`
   (multi-stage: a `node:24-alpine` stage runs `pnpm build` on the frontend —
   the artifact is not committed, so the image builds it from source with
@@ -357,7 +358,10 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   `fly.toml`
   (port 8080, `[http_service.checks]` on /healthz,
   `auto_stop_machines = "suspend"` so the rootfs — and the grace clocks —
-  survive idle suspension, and a `[[files]]` entry injecting the config).
+  survive idle suspension, and a `[[files]]` entry injecting the config),
+  and `deploy.sh` (the routine-deploy script: secrets sync, `fly deploy`,
+  and reaper-Machine recreation on the latest released image — see the
+  Hosting bullet).
 - **The config reaches the Machine as a secret, not a file.**
   `niceat.json` is gitignored and instance-specific, so `fly.toml` maps
   it from a base64-encoded secret (`NICEAT_CONFIG`) to `/app/niceat.json`
