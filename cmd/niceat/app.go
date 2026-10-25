@@ -80,7 +80,7 @@ type app struct {
 	// domains is the set of apex domains this instance manages, keyed by
 	// normalized lowercase name (parseDomain's output).  Each request's
 	// Host header selects which domain a handle is registered under, so a
-	// single deployment can serve *.wagg.ing, *.yeen.world, ... at once.
+	// single deployment can serve *.wagg.ing, *.vore.rip, ... at once.
 	domains map[string]bool
 	// provisioner creates the DNS record that maps a handle to a DID.
 	// The Porkbun client (porkbun.go) is the real implementation; without

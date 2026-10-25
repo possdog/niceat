@@ -26,7 +26,7 @@ directory; the file is instance-specific and gitignored:
 
 ```json
 {
-  "domains": ["wagg.ing", "yeen.world"],
+  "domains": ["wagg.ing", "vore.rip"],
   "addr": ":8080",
   "reaper": {"enabled": true, "interval": "6h", "grace": "720h"}
 }
@@ -84,7 +84,7 @@ working directory maps each managed domain to its own key pair
 ```json
 {
   "wagg.ing":   {"api_key": "pk1_…", "secret_key": "sk1_…"},
-  "yeen.world": {"api_key": "pk1_…", "secret_key": "sk1_…"}
+  "vore.rip": {"api_key": "pk1_…", "secret_key": "sk1_…"}
 }
 ```
 
@@ -229,7 +229,7 @@ CSS inlined), emitted directly into `cmd/niceat/web/` for `go:embed`.  The
 Go server serves it unchanged at `/` on every managed domain:
 the domain parameterization is **client-side** — the page reads
 `location.hostname` to show "*a Bluesky handle under wagg.ing*" (the
-equivalent on yeen.world) and posts the form same-origin, so the Host
+equivalent on vore.rip) and posts the form same-origin, so the Host
 header carries the domain selection.  The server does no per-Host markup.
 
 The artifact is gitignored (see Build & run): `go build` and the tests need

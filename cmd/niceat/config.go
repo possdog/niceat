@@ -17,7 +17,7 @@ const defaultListenAddr = ":8080"
 // config is the on-disk deployment configuration, e.g.:
 //
 //	{
-//	  "domains": ["wagg.ing", "yeen.world"],
+//	  "domains": ["wagg.ing", "vore.rip"],
 //	  "addr": ":8080"
 //	}
 //

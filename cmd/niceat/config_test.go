@@ -28,8 +28,8 @@ func TestLoadConfig(t *testing.T) {
 	}{
 		{
 			name:        "happy path",
-			content:     `{"domains": ["wagg.ing", "yeen.world"], "addr": ":9000"}`,
-			wantDomains: []string{"wagg.ing", "yeen.world"},
+			content:     `{"domains": ["wagg.ing", "vore.rip"], "addr": ":9000"}`,
+			wantDomains: []string{"wagg.ing", "vore.rip"},
 			wantAddr:    ":9000",
 		},
 		{
@@ -127,10 +127,10 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestManagedSet(t *testing.T) {
-	cfg := &config{Domains: []string{"wagg.ing", "yeen.world"}}
+	cfg := &config{Domains: []string{"wagg.ing", "vore.rip"}}
 	set := cfg.managedSet()
-	if len(set) != 2 || !set["wagg.ing"] || !set["yeen.world"] {
-		t.Fatalf("managedSet = %v, want {wagg.ing, yeen.world}", set)
+	if len(set) != 2 || !set["wagg.ing"] || !set["vore.rip"] {
+		t.Fatalf("managedSet = %v, want {wagg.ing, vore.rip}", set)
 	}
 }
 

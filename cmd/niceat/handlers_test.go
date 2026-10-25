@@ -303,7 +303,7 @@ func TestHandleRegisterProvisionerErrorIsRetryable(t *testing.T) {
 }
 
 func TestResolveDomain(t *testing.T) {
-	a := newTestApp(t, &fakeProvisioner{}, "wagg.ing", "Yeen.World")
+	a := newTestApp(t, &fakeProvisioner{}, "wagg.ing", "vore.rip")
 
 	tests := []struct {
 		host string
@@ -311,7 +311,7 @@ func TestResolveDomain(t *testing.T) {
 		ok   bool
 	}{
 		{"wagg.ing", "wagg.ing", true},
-		{"yeen.world", "yeen.world", true},
+		{"vore.rip", "vore.rip", true},
 		{"WAGG.ING", "wagg.ing", true},       // DNS names are case-insensitive
 		{"wagg.ing:8443", "wagg.ing", true},  // Host header may carry a port
 		{"wagg.ing.", "wagg.ing", true},      // FQDN trailing dot
@@ -344,14 +344,14 @@ func TestHandleRegisterHostSelection(t *testing.T) {
 		wantHandle string
 	}{
 		{"first managed domain", "wagg.ing", "john.wagg.ing"},
-		{"second managed domain", "yeen.world", "john.yeen.world"},
+		{"second managed domain", "vore.rip", "john.vore.rip"},
 		{"case-insensitive host", "Wagg.Ing", "john.wagg.ing"},
 		{"host with port", "wagg.ing:8443", "john.wagg.ing"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &fakeProvisioner{}
-			a := newTestApp(t, p, "wagg.ing", "yeen.world")
+			a := newTestApp(t, p, "wagg.ing", "vore.rip")
 			w := doRegisterAt(t, a, tt.host, registerBody(t, "john", validPLC), "")
 
 			if w.Code != http.StatusCreated {
@@ -388,7 +388,7 @@ func TestHandleRegisterUnknownHost(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &fakeProvisioner{}
-			a := newTestApp(t, p, "wagg.ing", "yeen.world")
+			a := newTestApp(t, p, "wagg.ing", "vore.rip")
 			w := doRegisterAt(t, a, tt.host, registerBody(t, "john", validPLC), "")
 
 			if w.Code != http.StatusMisdirectedRequest {

@@ -89,7 +89,7 @@ func TestParseDomain(t *testing.T) {
 		// --- valid, canonicalized ---
 		{"simple", "wagg.ing", "wagg.ing", false},
 		{"uppercase normalized", "WAGG.ING", "wagg.ing", false},
-		{"padded", "  yeen.world  ", "yeen.world", false},
+		{"padded", "  vore.rip  ", "vore.rip", false},
 		{"fqdn trailing dot", "wagg.ing.", "wagg.ing", false},
 		{"multi-label", "handles.wagg.ing", "handles.wagg.ing", false},
 		{"hyphenated label", "my-site.example.com", "my-site.example.com", false},

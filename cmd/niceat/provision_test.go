@@ -40,7 +40,7 @@ func TestMemoryProvisionerDIDLimit(t *testing.T) {
 
 	// The cap is per domain: the same DID may claim the same label shape
 	// under another community.
-	outcome, err = m.Provision(ctx, "yeen.world", "mary", validPLC)
+	outcome, err = m.Provision(ctx, "vore.rip", "mary", validPLC)
 	if err != nil {
 		t.Fatalf("cross-domain provision: %v", err)
 	}
