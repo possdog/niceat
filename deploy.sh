@@ -44,9 +44,13 @@ fly deploy -a "$APP"
 # grace clocks (reaps are delayed, never accelerated — the fail-safe
 # direction by design).  Its creation-time run doubles as a per-deploy
 # smoke test: watch `fly logs -a $APP` for "reaper sweep complete".
+#
+# Selection is an exact match on the reaper process group, so a Machine
+# created by hand (no group metadata) is never touched here — destroy
+# such a Machine explicitly if it was one.
 OLD=$(fly machines list -a "$APP" --json |
 	jq -r '[.[]
-		| select((.config.metadata["fly_process_group"] // "") != "app")
+		| select(.config.metadata["fly_process_group"] == "reaper")
 		| .id] | join(" ")')
 for id in $OLD; do
 	fly machines destroy -a "$APP" --force "$id"
