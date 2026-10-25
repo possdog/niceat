@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,15 @@ func (rl *rateLimiter) sweepLocked() {
 	}
 }
 
+// runningOnFly reports whether this process runs as a Fly.io Machine (Fly
+// injects FLY_MACHINE_ID into every Machine).  Fly-Client-IP is trustworthy
+// only behind Fly's edge, so the gate must exist: outside Fly nothing strips
+// or overwrites Fly-Client-IP, so honoring it unconditionally would let any
+// client mint fresh rate-limit buckets (and fake audit IPs) per request just
+// by setting the header.
+// Package-level so tests can flip it without touching the environment.
+var runningOnFly = os.Getenv("FLY_MACHINE_ID") != ""
+
 // isTrustedProxy reports whether the given host is a trusted reverse proxy.
 // Currently only localhost (127.0.0.1 and ::1) is trusted.
 func isTrustedProxy(host string) bool {
@@ -105,6 +115,19 @@ func (rl *rateLimiter) middleware(next http.Handler) http.Handler {
 
 // clientIP extracts the caller's IP from the request.
 //
+// When running on Fly.io (detected via FLY_MACHINE_ID), TLS terminates at
+// Fly's edge proxy and the request arrives over Fly's internal network, so
+// r.RemoteAddr is Fly's proxy infrastructure — not the client, and not a
+// localhost proxy the X-Forwarded-For logic below could recognize.  Fly's
+// edge sets or overwrites Fly-Client-IP on every proxied request, so a
+// client cannot forge it once the request has passed through Fly's proxy;
+// the FLY_MACHINE_ID gate keeps that trust from extending to non-Fly
+// deployments, where nothing strips the header and it would be pure
+// client input.  A present-but-invalid value is not trusted: it means the
+// request did not come through Fly's edge (e.g., another Machine on the
+// internal network), and the peer address is the best available fact —
+// falling back to a spoofable value would be worse than the peer's.
+//
 // When the server is directly exposed to the internet (no reverse proxy),
 // r.RemoteAddr is the kernel-supplied TCP source IP and is used directly.
 //
@@ -124,6 +147,16 @@ func clientIP(r *http.Request) string {
 	if err != nil {
 		// RemoteAddr has no port; fall back to the raw value.
 		host = r.RemoteAddr
+	}
+
+	// Fly's edge overwrites Fly-Client-IP, so behind the proxy it is
+	// authoritative; a missing or unparseable value means the request
+	// bypassed Fly's edge and we fall back to RemoteAddr's host (the
+	// localhost XFF logic below still applies on top of that).
+	if runningOnFly {
+		if flyIP := r.Header.Get("Fly-Client-IP"); validIP(flyIP) {
+			return flyIP
+		}
 	}
 
 	if isTrustedProxy(host) {

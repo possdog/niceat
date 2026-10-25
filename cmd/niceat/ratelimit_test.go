@@ -126,6 +126,74 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
+func TestClientIPFly(t *testing.T) {
+	// Flip the package-level detection var rather than the environment:
+	// os.Setenv would not re-run the package var's initialization.
+	orig := runningOnFly
+	defer func() { runningOnFly = orig }()
+
+	tests := []struct {
+		name         string
+		onFly        bool
+		remoteAddr   string
+		flyClientIP  string
+		forwardedFor string
+		want         string
+	}{
+		{
+			// Fly's edge sets/overwrites Fly-Client-IP on proxied
+			// requests, so behind the proxy it is authoritative.
+			name:        "valid Fly-Client-IP is used",
+			onFly:       true,
+			remoteAddr:  "fdaa:0:1::3:4567",
+			flyClientIP: "198.51.100.7",
+			want:        "198.51.100.7",
+		},
+		{
+			// An unparseable header value means the request did not
+			// come through Fly's edge; the peer address is the best
+			// available fact and a garbage value must never become
+			// the key of a rate-limit bucket.
+			name:        "invalid Fly-Client-IP falls back to RemoteAddr",
+			onFly:       true,
+			remoteAddr:  "fdaa:0:1::3:4567",
+			flyClientIP: "not-an-ip",
+			want:        "fdaa:0:1::3:4567",
+		},
+		{
+			name:       "missing Fly-Client-IP falls back to RemoteAddr",
+			onFly:      true,
+			remoteAddr: "fdaa:0:1::3:4567",
+			want:       "fdaa:0:1::3:4567",
+		},
+		{
+			// Outside Fly the header is pure client input: honoring
+			// it would let a client mint fresh buckets per request.
+			name:         "spoofed Fly-Client-IP ignored when not on Fly",
+			remoteAddr:   "198.51.100.7:44321",
+			flyClientIP:  "1.2.3.4",
+			forwardedFor: "5.6.7.8",
+			want:         "198.51.100.7",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runningOnFly = tt.onFly
+			req := httptest.NewRequest(http.MethodPost, "/register", nil)
+			req.RemoteAddr = tt.remoteAddr
+			if tt.flyClientIP != "" {
+				req.Header.Set("Fly-Client-IP", tt.flyClientIP)
+			}
+			if tt.forwardedFor != "" {
+				req.Header.Set("X-Forwarded-For", tt.forwardedFor)
+			}
+			if got := clientIP(req); got != tt.want {
+				t.Fatalf("clientIP() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRateLimitMiddleware(t *testing.T) {
 	t.Run("within burst passes through", func(t *testing.T) {
 		rl := newRateLimiter()
