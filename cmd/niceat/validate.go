@@ -154,6 +154,13 @@ func ensureHandleClaimable(label, domain string) error {
 // The returned error's message is safe to show the user verbatim.
 func validateDID(raw string) (string, error) {
 	did := strings.TrimSpace(raw)
+	// bsky.app's "Change Handle" flow hands users the exact TXT record
+	// value to configure — "did=<DID>" — and pasting it verbatim is the
+	// natural thing to do.  A real DID never starts with "did=" (it
+	// starts with "did:"), so stripping that prefix is unambiguous; trim
+	// again for pastes that pick up a space after the equals sign.
+	did = strings.TrimPrefix(did, "did=")
+	did = strings.TrimSpace(did)
 	if did == "" {
 		return "", fmt.Errorf("did is required")
 	}

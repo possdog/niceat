@@ -186,6 +186,11 @@ func TestValidateDID(t *testing.T) {
 	}{
 		// --- valid ---
 		{"plc", validPLC, validPLC, false},
+		// bsky.app's Change Handle flow copies the full TXT value; the
+		// "did=" prefix must not require manual trimming.
+		{"plc with did= prefix", "did=did:plc:" + validPLC[8:], validPLC, false},
+		{"web with did= prefix", "did=did:web:example.com", "did:web:example.com", false},
+		{"did= prefix with space", "did= " + validPLC, validPLC, false},
 		{"plc digits 2-7", "did:plc:2345672abcdefghij2345672", "did:plc:2345672abcdefghij2345672", false},
 		{"plc padded with whitespace", " " + validPLC + "\t", validPLC, false},
 		{"web host", "did:web:example.com", "did:web:example.com", false},

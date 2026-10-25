@@ -178,7 +178,10 @@ spec (atproto.com/specs/handle), the reference implementation
   segments become URL path segments; `/.well-known/did.json` only for the
   root form), so the reaper can judge records bound to them; identifiers
   that would map to a traversal or non-spec URL are unverifiable (reaper
-  skips, never reaps on an error).
+  skips, never reaps on an error).  One deliberate tolerance:
+  a leading `did=` is stripped (bsky.app's Change Handle flow copies the
+  full TXT value, and users paste it verbatim) — unambiguous because a
+  real DID starts with `did:`, never `did=`.
 
 ## Architecture
 
