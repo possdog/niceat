@@ -25,9 +25,10 @@ primary_region = "iad"
 [http_service]
   internal_port = 8080
   force_https = true
-  # Suspend (not stop) on idle: suspended Machines keep their rootfs, so the
-  # reaper's reaper_state.json survives idle periods and only redeploys reset
-  # its grace clocks — the safe direction by design.
+  # Suspend (not stop) on idle: suspended Machines wake faster, which
+  # matters for a form-driven service.  The reaper keeps no local state
+  # (its grace clocks live in the DNS zones as marker records), so idle
+  # behavior has no state implications either way.
   auto_stop_machines = "suspend"
   auto_start_machines = true
   min_machines_running = 0

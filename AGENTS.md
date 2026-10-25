@@ -14,8 +14,8 @@ into the Go binary.
 belongs to — is decided entirely by the existence and content of the
 `_atproto` TXT record in Porkbun.  There is deliberately no local ledger
 that could desync with the reaper, manual Porkbun dashboard edits,
-or zone restores.  (The reaper's `reaper_state.json` is a timing cache, not
-a claim ledger — see Defenses.)
+or zone restores.  (The reaper's grace clocks are also zone records —
+see Defenses.)
 
 ## Build & run
 
@@ -188,7 +188,7 @@ cmd/niceat/
 ├── provision.go   — provisioner interface + outcomes, memoryProvisioner
 ├── porkbun.go     — Porkbun client: zone listing, per-DID cap, create, reaper primitives
 ├── resolver.go    — DID document resolution (plc.directory / did:web well-known)
-├── reaper.go      — background task: sweep zones, grace state file, delete unused
+├── reaper.go      — background task: sweep zones, grace markers, delete unused
 ├── web.go         — go:embed of the built form page + serveIndex
 ├── web/           — frontend build artifact (index.html), gitignored build product
 └── *_test.go      — tests alongside source, fakes in helpers_test.go / porkbun_test.go
@@ -248,8 +248,9 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   `_atproto` name (corrupt per the atproto spec) is treated as taken, never
   stacked onto.  The check-then-create flow runs under a per-label lock
   (`labelLocks`) so concurrent requests cannot stack records.  No local
-  ledger exists that could desync with the reaper (whose state file is a
-  timing cache, not a claim ledger — see the reaper bullet below).
+  ledger exists at all — even the reaper's grace clocks are zone records
+  (see the reaper bullet below) — so nothing can desync with manual
+  Porkbun dashboard edits or zone restores.
 - **Per-IP rate limiting** (`ratelimit.go`) — token bucket per client IP
   (x/time/rate): burst 5, sustained 1 per 10 s; excess requests get 429.
   It wraps only `/register` — loading the form page is a public static
@@ -301,14 +302,17 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   `AUDIT: reaped ...` line for dispute resolution.  Stacked (corrupt)
   `_atproto` names are judged record by record, so a stacked pair loses
   its dead half and keeps its live one, healing the handle.  Grace
-  clocks live in `reaper_state.json` (working directory, gitignored),
-  keyed by **Porkbun record ID**: a re-registered label gets a fresh
-  record ID and therefore a fresh grace clock, so the reaper can never
-  delete a new claim on a stale clock; and the file is a timing cache,
-  not a claim ledger — losing or corrupting it only restarts clocks
-  (reaps are delayed, never accelerated).  The reaper only runs with
-  real Porkbun credentials (there is nothing to sweep in the
-  memoryProvisioner) and needs `porkbun.com` network egress in
+  clocks live in the zone itself as TXT marker records
+  (`_niceat-grace.<label>.<domain>`, content
+  `niceat-grace v1 <record ID> <RFC3339>`), keyed by **Porkbun record
+  ID**: a re-registered label gets a fresh record ID and therefore a
+  fresh grace clock, so the reaper can never delete a new claim on a
+  stale clock.  Storing clocks in the zone (not in a local file) makes
+  the reaper fully stateless — redeploys and recreated Machines cannot
+  restart grace clocks, and losing or corrupting a marker only restarts
+  that one clock (reaps are delayed, never accelerated).  The reaper
+  only runs with real Porkbun credentials (there is nothing to sweep in
+  the memoryProvisioner) and needs `porkbun.com` network egress in
   production.
 
 ## Deployment notes (not code)
@@ -334,10 +338,11 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   backstop; every network call already has its own timeout) and exits,
   which is what puts the Machine back to sleep.  A crash just stops the
   Machine until the next schedule — no crash loop, retry next day.  The
-  reaper's state file lives on the reaper Machine's rootfs, which
-  survives the scheduled stop/start cycle (losing it only restarts
-  grace clocks).  Both Machines share the same secrets; the same config
-  serves both (`-reap-once` ignores `reaper.enabled`).  Routine deploys
+  reaper is stateless (its grace clocks live in the DNS zones as marker
+  records), so neither the scheduled stop/start cycle nor a Machine
+  recreation on deploy touches any clock.  Both Machines share the same
+  secrets; the same config serves both (`-reap-once` ignores
+  `reaper.enabled`).  Routine deploys
   — secrets sync, serving Machine, and a reaper Machine recreated on
   the latest released image — are one command: `./deploy.sh`.  The
   reaper Machine carries metadata `fly_process_group=reaper` (what
@@ -350,15 +355,16 @@ SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   `CGO_ENABLED=0`, then `distroless/static:nonroot` runtime — distroless
   ships the CA
   certificates the Porkbun client and the DID resolver need for TLS, and
-  its `/app` workdir is pre-created nonroot-owned so the reaper can write
-  its state file), `.dockerignore` (a whitelist that lets only
+  its `/app` workdir is pre-created nonroot-owned), `.dockerignore`
+  (a whitelist that lets only
   `go.mod`/`go.sum`/`cmd/`/`frontend/` into the build context, minus the
   local `node_modules`/`dist`/`cmd/niceat/web` build products, so instance
   files and Porkbun keys can never reach the daemon or the image), and
   `fly.toml`
   (port 8080, `[http_service.checks]` on /healthz,
-  `auto_stop_machines = "suspend"` so the rootfs — and the grace clocks —
-  survive idle suspension, and a `[[files]]` entry injecting the config),
+  `auto_stop_machines = "suspend"` for fast wakeups from idle (the
+  reaper keeps no local state, so idle behavior has no state
+  implications), and a `[[files]]` entry injecting the config),
   and `deploy.sh` (the routine-deploy script: secrets sync, `fly deploy`,
   and reaper-Machine recreation on the latest released image — see the
   Hosting bullet).

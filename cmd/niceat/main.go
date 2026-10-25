@@ -81,7 +81,7 @@ func main() {
 		}
 		deadlineCtx, cancelDeadline := context.WithTimeout(ctx, reaperOnceDeadline)
 		defer cancelDeadline()
-		rep := newReaper(cfg.Domains, backend.(*porkbunProvisioner), newPlcDirectory(""), reaperStateFile, cfg.reaperGrace)
+		rep := newReaper(cfg.Domains, backend.(*porkbunProvisioner), newPlcDirectory(""), cfg.reaperGrace)
 		if err := rep.sweep(deadlineCtx); err != nil {
 			log.Fatalf("reaper sweep: %v", err)
 		}
@@ -96,7 +96,7 @@ func main() {
 	// false in its config) and a separate scheduled Machine reaps via
 	// -reap-once instead.
 	if haveCreds && cfg.reaperEnabled {
-		rep := newReaper(cfg.Domains, backend.(*porkbunProvisioner), newPlcDirectory(""), reaperStateFile, cfg.reaperGrace)
+		rep := newReaper(cfg.Domains, backend.(*porkbunProvisioner), newPlcDirectory(""), cfg.reaperGrace)
 		go rep.run(ctx, cfg.reaperInterval)
 		log.Printf("handle reaper enabled: interval %s, grace %s", cfg.reaperInterval, cfg.reaperGrace)
 	} else if !haveCreds && cfg.reaperEnabled {

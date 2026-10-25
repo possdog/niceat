@@ -40,10 +40,10 @@ fly deploy -a "$APP"
 # Reaper Machine.  Recreated — not updated — on every deploy so its
 # image, environment, and config file are all guaranteed current: a
 # Machine created through the Machines API is otherwise never touched by
-# `fly deploy`.  Recreating drops reaper_state.json, which only restarts
-# grace clocks (reaps are delayed, never accelerated — the fail-safe
-# direction by design).  Its creation-time run doubles as a per-deploy
-# smoke test: watch `fly logs -a $APP` for "reaper sweep complete".
+# `fly deploy`.  The reaper is stateless (grace clocks live in the DNS
+# zones as marker records), so recreation costs nothing but the Machine
+# creation itself.  Its creation-time run doubles as a per-deploy smoke
+# test: watch `fly logs -a $APP` for "reaper sweep complete".
 #
 # Selection is an exact match on the reaper process group, so a Machine
 # created by hand (no group metadata) is never touched here — destroy

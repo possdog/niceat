@@ -24,10 +24,9 @@ COPY cmd ./cmd
 COPY --from=frontend /src/cmd/niceat/web/index.html ./cmd/niceat/web/
 # CGO_ENABLED=0: the distroless runtime stage ships no libc, so the binary
 # must be static; -trimpath and -s -w shave it to a few MB.
-# /app is pre-created and chowned to nonroot (65532) because the runtime works
-# there (the -config default and the reaper's reaper_state.json both live in
-# the working directory) and the distroless nonroot user must be able to
-# write the state file.
+# /app is pre-created and chowned to nonroot (65532) so the nonroot runtime
+# owns its working directory (the -config default is injected there); the
+# reaper keeps no local state, its grace clocks live in the DNS zones.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/niceat ./cmd/niceat \
     && mkdir /out/app \
     && chown 65532:65532 /out/app
@@ -36,8 +35,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/niceat ./cmd/nicea
 # reaper's DID resolver need for TLS, plus a nonroot user, and nothing else.
 FROM gcr.io/distroless/static-debian12:nonroot
 # Copy the (empty) app directory first so /app itself lands owned by nonroot;
-# copying only the binary would create a root-owned /app the reaper cannot
-# write its state file into.
+# copying only the binary would create a root-owned /app.
 COPY --from=build --chown=65532:65532 /out/app /app
 COPY --from=build --chown=65532:65532 /out/niceat /app/niceat
 WORKDIR /app

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fqdn builds the record name Porkbun returns in zone listings:
@@ -107,21 +108,28 @@ func (f *fakePorkbunServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.lastCreate = body
+		// Like the real API, a record created with a relative name
+		// (e.g. "_atproto.john") is listed back under its FQDN.
+		domain := strings.TrimPrefix(r.URL.Path, "/dns/create/")
+		name := body["name"]
+		if !strings.HasSuffix(name, "."+domain) {
+			name = name + "." + domain
+		}
 		// Sandbox-verified semantics: an exact duplicate is rejected
 		// with DUPLICATE_RECORD; anything else stacks.
-		for i, c := range f.records[body["name"]] {
+		for i, c := range f.records[name] {
 			if c == body["content"] {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"status":     "ERROR",
 					"code":       porkbunDuplicateCode,
 					"message":    "A DNS record with this name, type, and content already exists.",
-					"existingId": fakeRecordID(body["name"], i),
+					"existingId": fakeRecordID(name, i),
 				})
 				return
 			}
 		}
-		f.records[body["name"]] = append(f.records[body["name"]], body["content"])
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "SUCCESS", "id": fakeRecordID(body["name"], len(f.records[body["name"]])-1)})
+		f.records[name] = append(f.records[name], body["content"])
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "SUCCESS", "id": fakeRecordID(name, len(f.records[name])-1)})
 
 	case strings.HasPrefix(r.URL.Path, "/dns/delete/"):
 		f.deletes++
@@ -195,7 +203,7 @@ func TestPorkbunProvisionCreates(t *testing.T) {
 			t.Fatalf("create body %q = %q, want %q", k, f.lastCreate[k], v)
 		}
 	}
-	if got := f.records["_atproto.john"]; len(got) != 1 || got[0] != "did="+validPLC {
+	if got := f.records[fqdn(testDomain, "john")]; len(got) != 1 || got[0] != "did="+validPLC {
 		t.Fatalf("record not stored: %v", f.records)
 	}
 }
@@ -664,5 +672,64 @@ func TestPorkbunDeleteRecord(t *testing.T) {
 	// silent success.
 	if err := p.deleteRecord(context.Background(), testDomain, "no-such-id"); err == nil {
 		t.Fatal("expected an error deleting a nonexistent record id")
+	}
+}
+
+func TestPorkbunGraceMarkers(t *testing.T) {
+	// The marker round trip: a created marker lists back with the record
+	// id and timestamp it was written with, markers never appear in
+	// listAtproto, and a duplicate create (same content) is idempotent.
+	f := newFakePorkbun()
+	p := newTestPorkbun(t, f)
+	ctx := context.Background()
+	since := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	if err := p.createGraceMarker(ctx, testDomain, "john", "rec-1", since); err != nil {
+		t.Fatalf("createGraceMarker: %v", err)
+	}
+	// An identical write is a no-op, not an error.
+	if err := p.createGraceMarker(ctx, testDomain, "john", "rec-1", since); err != nil {
+		t.Fatalf("duplicate createGraceMarker: %v", err)
+	}
+
+	markers, err := p.listGraceMarkers(ctx, testDomain)
+	if err != nil {
+		t.Fatalf("listGraceMarkers: %v", err)
+	}
+	if len(markers) != 1 {
+		t.Fatalf("expected exactly one marker, got %v", markers)
+	}
+	m := markers[0]
+	if m.Corrupt || m.RecordID != "rec-1" || !m.Since.Equal(since) {
+		t.Fatalf("marker round trip mismatch: %+v", m)
+	}
+	if m.ID == "" {
+		t.Fatal("marker must carry its own record id for deletion")
+	}
+
+	// Markers live in their own namespace: listAtproto must not see one.
+	records, err := p.listAtproto(ctx, testDomain)
+	if err != nil {
+		t.Fatalf("listAtproto: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("grace markers must not be listed as claims, got %v", records)
+	}
+
+	// And a marker whose content is foreign (or a future version) is
+	// corrupt, not silently misread as a clock.
+	f.records[graceMarkerPrefix+".mary."+testDomain] = []string{"niceat-grace v999 rec-2 2026-01-01T00:00:00Z"}
+	markers, err = p.listGraceMarkers(ctx, testDomain)
+	if err != nil {
+		t.Fatalf("listGraceMarkers: %v", err)
+	}
+	var corrupt *graceMarker
+	for i := range markers {
+		if markers[i].ID == fakeRecordID(graceMarkerPrefix+".mary."+testDomain, 0) {
+			corrupt = &markers[i]
+		}
+	}
+	if corrupt == nil || !corrupt.Corrupt || corrupt.RecordID != "" {
+		t.Fatalf("future-version marker must be corrupt with no record id, got %+v", corrupt)
 	}
 }

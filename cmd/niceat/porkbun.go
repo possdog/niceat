@@ -38,6 +38,27 @@ const (
 	porkbunMaxResponse = 1 << 20 // 1 MiB
 )
 
+// Grace-marker constants: the reaper stores its grace clocks in the zone
+// itself, as TXT records the way the claims are.  That keeps the reaper
+// fully stateless — a redeploy, a recreated Machine, or a lost state file
+// can no longer restart grace clocks, because there is no state file.
+const (
+	// graceMarkerPrefix is the record-name prefix under which grace
+	// clocks live: _niceat-grace.<label>.<domain>, one marker per
+	// _atproto record.  The namespace is exclusively niceat's — user
+	// labels are validated without underscores and every user claim
+	// lives under the _atproto prefix, so no claim can ever collide
+	// with (or be mistaken for) a marker.
+	graceMarkerPrefix = "_niceat-grace"
+	// The marker content is exactly four whitespace-separated fields:
+	// the tag, a format version (unknown versions are treated as
+	// corrupt, which only restarts clocks — the fail-safe direction),
+	// the _atproto record id the clock belongs to, and the first
+	// mismatch time.
+	graceMarkerTag     = "niceat-grace"
+	graceMarkerVersion = "v1"
+)
+
 // errDuplicateRecord reports that Porkbun refused a create because the exact
 // record already exists.  It is a sentinel (not a wrapped error) so callers
 // can branch on it with errors.Is.
@@ -431,6 +452,73 @@ func (p *porkbunProvisioner) listAtproto(ctx context.Context, domain string) ([]
 func (p *porkbunProvisioner) deleteRecord(ctx context.Context, domain, id string) error {
 	if _, err := p.call(ctx, domain, "/dns/delete/"+domain+"/"+id, map[string]string{}); err != nil {
 		return fmt.Errorf("deleting record %s: %w", id, err)
+	}
+	return nil
+}
+
+// graceMarker is one reaper grace clock as stored in the zone: a TXT record
+// at _niceat-grace.<label>.<domain> whose content encodes the _atproto
+// record the clock belongs to and when the first affirmative mismatch was
+// observed.  Keeping clocks in the zone (instead of a local file) makes the
+// reaper stateless: redeploys, recreated Machines, and lost files can only
+// ever be corrected by the zone, which is also the claim store.
+type graceMarker struct {
+	// ID is the marker record's own Porkbun id, used to delete it.
+	ID string
+	// RecordID is the _atproto record id the clock belongs to.  Keying
+	// the clock on the claim's record id is what guarantees a
+	// re-registered label (fresh record, fresh id) starts a fresh clock.
+	RecordID string
+	// Since is the first-mismatch observation time.
+	Since time.Time
+	// Corrupt marks a marker whose content could not be parsed.  It
+	// matches no record and the reaper prunes it; treating garbage as
+	// no clock is the fail-safe direction — a fresh clock starts and
+	// reaps are delayed, never hastened.
+	Corrupt bool
+}
+
+// listGraceMarkers returns every grace-marker TXT record in the zone.
+// Unparseable contents are returned as Corrupt markers rather than dropped,
+// so the reaper can prune them instead of leaving them to accumulate.
+func (p *porkbunProvisioner) listGraceMarkers(ctx context.Context, domain string) ([]graceMarker, error) {
+	env, err := p.call(ctx, domain, "/dns/retrieve/"+domain, map[string]string{})
+	if err != nil {
+		return nil, fmt.Errorf("listing zone records: %w", err)
+	}
+	var out []graceMarker
+	for _, r := range env.Records {
+		if r.Type != "TXT" || !strings.HasPrefix(r.Name, graceMarkerPrefix+".") {
+			continue
+		}
+		m := graceMarker{ID: r.ID, Corrupt: true}
+		fields := strings.Fields(r.Content)
+		if len(fields) == 4 && fields[0] == graceMarkerTag && fields[1] == graceMarkerVersion {
+			if since, err := time.Parse(time.RFC3339, fields[3]); err == nil {
+				m.RecordID, m.Since, m.Corrupt = fields[2], since, false
+			}
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// createGraceMarker starts a grace clock by writing the marker record into
+// the zone.  A DUPLICATE_RECORD response is success: the identical marker
+// (same record id and timestamp) is already there, which is exactly as good.
+func (p *porkbunProvisioner) createGraceMarker(ctx context.Context, domain, label, recordID string, since time.Time) error {
+	content := fmt.Sprintf("%s %s %s %s",
+		graceMarkerTag, graceMarkerVersion, recordID, since.UTC().Format(time.RFC3339))
+	if _, err := p.call(ctx, domain, "/dns/create/"+domain, map[string]string{
+		"type":    "TXT",
+		"name":    graceMarkerPrefix + "." + label,
+		"content": content,
+		"ttl":     porkbunRecordTTL,
+	}); err != nil {
+		if errors.Is(err, errDuplicateRecord) {
+			return nil
+		}
+		return fmt.Errorf("creating grace marker: %w", err)
 	}
 	return nil
 }
