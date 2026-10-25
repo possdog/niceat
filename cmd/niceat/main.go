@@ -125,5 +125,9 @@ func (a *app) newMux(rl *rateLimiter) *http.ServeMux {
 	// {$} matches only "/" exactly; every other path falls through to the
 	// mux's plain 404.
 	mux.HandleFunc("GET /{$}", a.serveIndex)
+	// Liveness probe for deploy-time health checks (Fly [http_service.checks]).
+	// Not rate-limited, like the form page: health probes are
+	// infrastructure traffic, not visitor registrations.
+	mux.Handle("GET /healthz", http.HandlerFunc(a.handleHealthz))
 	return mux
 }
