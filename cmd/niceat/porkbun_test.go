@@ -500,6 +500,89 @@ func TestLoadPorkbunCredentials(t *testing.T) {
 			t.Fatal("expected ok=false when no managed domain has a pair")
 		}
 	})
+
+	t.Run("env credentials", func(t *testing.T) {
+		// Fly.io's secrets model is environment variables: a full pair
+		// per domain must be accepted with no files present at all.
+		t.Setenv("PORKBUN_WAGG_ING_API_KEY", "  pk1_env\n")
+		t.Setenv("PORKBUN_WAGG_ING_SECRET_KEY", "sk1_env")
+		t.Setenv("PORKBUN_YEEN_WORLD_API_KEY", "pk1_env2")
+		t.Setenv("PORKBUN_YEEN_WORLD_SECRET_KEY", "sk1_env2")
+		creds, ok, err := loadPorkbunCredentials(t.TempDir(), domains)
+		if err != nil || !ok {
+			t.Fatalf("expected ok, got ok=%v err=%v", ok, err)
+		}
+		// Env values are trimmed like file contents.
+		want := map[string]porkbunCreds{
+			"wagg.ing":   {apiKey: "pk1_env", secretKey: "sk1_env"},
+			"yeen.world": {apiKey: "pk1_env2", secretKey: "sk1_env2"},
+		}
+		for _, d := range domains {
+			if creds[d] != want[d] {
+				t.Fatalf("creds for %s = %+v, want %+v", d, creds[d], want[d])
+			}
+		}
+	})
+
+	t.Run("env wins over files", func(t *testing.T) {
+		// A stale file from local development must not shadow what the
+		// operator set with fly secrets set.
+		dir := t.TempDir()
+		write(t, dir, "wagg.ing", "api_key", "pk1_file")
+		write(t, dir, "wagg.ing", "secret_key", "sk1_file")
+		t.Setenv("PORKBUN_WAGG_ING_API_KEY", "pk1_env")
+		t.Setenv("PORKBUN_WAGG_ING_SECRET_KEY", "sk1_env")
+		creds, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
+		if err != nil || !ok {
+			t.Fatalf("expected ok, got ok=%v err=%v", ok, err)
+		}
+		if want := (porkbunCreds{apiKey: "pk1_env", secretKey: "sk1_env"}); creds["wagg.ing"] != want {
+			t.Fatalf("creds = %+v, want the env pair %+v", creds["wagg.ing"], want)
+		}
+	})
+
+	t.Run("half env pair", func(t *testing.T) {
+		t.Setenv("PORKBUN_WAGG_ING_API_KEY", "pk1_env")
+		_, ok, err := loadPorkbunCredentials(t.TempDir(), []string{"wagg.ing"})
+		if err == nil || ok {
+			t.Fatalf("expected an error for a half-present env pair, got ok=%v err=%v", ok, err)
+		}
+		if !strings.Contains(err.Error(), "wagg.ing") {
+			t.Fatalf("error should name the domain, got: %v", err)
+		}
+	})
+
+	t.Run("env suffix collision", func(t *testing.T) {
+		// a-b.c and a.b-c both map to A_B_C: two configured domains
+		// silently sharing one key pair would defeat the per-domain
+		// scoping's blast-radius containment.
+		_, ok, err := loadPorkbunCredentials(t.TempDir(), []string{"a-b.c", "a.b-c"})
+		if err == nil || ok {
+			t.Fatalf("expected an error for colliding env suffixes, got ok=%v err=%v", ok, err)
+		}
+		for _, domain := range []string{"a-b.c", "a.b-c"} {
+			if !strings.Contains(err.Error(), domain) {
+				t.Fatalf("error should name %q, got: %v", domain, err)
+			}
+		}
+	})
+
+	t.Run("empty env falls back to files", func(t *testing.T) {
+		// An env value that is empty or whitespace-only counts as
+		// absent, so the domain's file pair is used.
+		dir := t.TempDir()
+		write(t, dir, "wagg.ing", "api_key", "pk1_file")
+		write(t, dir, "wagg.ing", "secret_key", "sk1_file")
+		t.Setenv("PORKBUN_WAGG_ING_API_KEY", "")
+		t.Setenv("PORKBUN_WAGG_ING_SECRET_KEY", "  \n")
+		creds, ok, err := loadPorkbunCredentials(dir, []string{"wagg.ing"})
+		if err != nil || !ok {
+			t.Fatalf("expected ok from the file pair, got ok=%v err=%v", ok, err)
+		}
+		if want := (porkbunCreds{apiKey: "pk1_file", secretKey: "sk1_file"}); creds["wagg.ing"] != want {
+			t.Fatalf("creds = %+v, want the file pair %+v", creds["wagg.ing"], want)
+		}
+	})
 }
 
 func TestPorkbunListAtproto(t *testing.T) {
