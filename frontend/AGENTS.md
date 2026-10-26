@@ -27,7 +27,10 @@ Package manager: pnpm.
 
 **Always avoid writing custom CSS unless Bulma is simply not up to the
 task.** When an exception is unavoidable, keep it narrowly scoped (one
-component or one utility) and comment why.
+component or one utility) and comment why.  Custom CSS lives in
+`src/custom.css`, imported in `src/main.ts` right after Bulma so overrides
+win at equal specificity; `vite-plugin-singlefile` inlines it into the
+single `index.html` like any other CSS import.
 
 ## Architecture notes
 
