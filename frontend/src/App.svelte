@@ -4,15 +4,18 @@
   // selection.  No server-side markup parameterization is needed.
   const domain = location.hostname
 
+  // bsky.app refuses custom-domain handles longer than 30 characters in total
+  // (see AGENTS.md, "Composed handle"), so the label budget is whatever the
+  // served domain leaves over.  Bounding the input to it also keeps the
+  // composed handle inside the field instead of scrolling out of it, which
+  // matters because the field's visible text is the full composed handle.
+  const maxLabel = Math.max(3, 30 - `.${domain}`.length)
+
   let label = $state('')
   let did = $state('')
   let submitting = $state(false)
   // $state.raw: reassigned wholesale, never mutated, so no proxy is needed.
   let result = $state.raw<{ ok: boolean; message: string } | null>(null)
-
-  // clsx-style join helper for Bulma class lists built from conditionals.
-  const cx = (...parts: (string | false | undefined)[]) =>
-    parts.filter(Boolean).join(' ')
 
   async function submit(event: SubmitEvent) {
     event.preventDefault()
@@ -67,90 +70,81 @@
   }
 </script>
 
-<section class="section">
-  <div class="container">
-    <div class="columns is-centered">
-      <div class="column is-half-desktop">
-        <h1 class="title">Claim your handle</h1>
-        <p class="subtitle">
-          a Bluesky handle under <strong>{domain}</strong>
-        </p>
+<!-- Blades is classless: every element below is styled from its tag, role
+     and ARIA state, so `container narrow` (see custom.css) is the only
+     styling hook the page needs. -->
+<main class="container narrow">
+  <hgroup>
+    <h1>Claim your handle</h1>
+    <p>a Bluesky handle under <strong>{domain}</strong></p>
+  </hgroup>
 
-        <p>
-          Registering creates the DNS record that binds the handle to your
-          Bluesky account. It's free, instant, and yours until you stop
-          using it.
-        </p>
+  <p>
+    Registering creates the DNS record that binds the handle to your Bluesky
+    account. It's free, instant, and yours until you stop using it.
+  </p>
 
-        <form onsubmit={submit}>
-          <div class="field">
-            <label class="label" for="handle">Handle</label>
-            <div class="field has-addons">
-              <p class="control is-expanded">
-                <input
-                  id="handle"
-                  class="input"
-                  type="text"
-                  placeholder="yourname"
-                  maxlength="63"
-                  autocomplete="off"
-                  spellcheck="false"
-                  required
-                  bind:value={label}
-                />
-              </p>
-              <p class="control">
-                <span class="button is-static">.{domain}</span>
-              </p>
-            </div>
-            <p class="help">
-              3–63 characters: lowercase letters, digits, and hyphens (no
-              leading or trailing hyphen).
-            </p>
-          </div>
-
-          <div class="field">
-            <label class="label" for="did">Bluesky DID</label>
-            <div class="control">
-              <input
-                id="did"
-                class="input"
-                type="text"
-                placeholder="did:plc:…"
-                maxlength="200"
-                autocomplete="off"
-                spellcheck="false"
-                required
-                bind:value={did}
-              />
-            </div>
-            <p class="help">
-              Your account's ID, not your username. In the Bluesky app:
-              Settings → Advanced → "Copy your DID".
-            </p>
-          </div>
-
-          <div class="field">
-            <div class="control">
-              <button
-                type="submit"
-                class={cx('button is-primary', submitting && 'is-loading')}
-                disabled={submitting}
-              >
-                Register
-              </button>
-            </div>
-          </div>
-        </form>
-
-        {#if result}
-          <article
-            class={cx('message', result.ok ? 'is-success' : 'is-danger')}
-          >
-            <div class="message-body">{result.message}</div>
-          </article>
-        {/if}
-      </div>
+  <form onsubmit={submit}>
+    <label for="handle">Handle</label>
+    <!-- The field shows the handle as Bluesky will: label plus domain, as one
+         string.  Only the label is editable, so the input carries it alone and
+         its own glyphs are transparent — `.handle-fill` draws `label.domain`
+         underneath, which leaves the caret, selection and typing inside the
+         label and makes the domain unreachable with the cursor. -->
+    <div class="handle-field">
+      <input
+        id="handle"
+        type="text"
+        maxlength={maxLabel}
+        autocomplete="off"
+        spellcheck="false"
+        required
+        bind:value={label}
+        aria-describedby="handle-hint"
+      />
+      <!-- One line on purpose: the overlay's text must contain no whitespace
+           between the label and the suffix, or the field would show a gap.
+           While the field is empty the `{#if}` swaps in a sample name, so an
+           untouched field still reads as a whole handle. -->
+      <span class="handle-fill" aria-hidden="true">{#if label}{label}{:else}<span class="handle-placeholder">yourname</span>{/if}<span class="handle-suffix">.{domain}</span></span>
     </div>
-  </div>
-</section>
+    <small id="handle-hint">
+      3–{maxLabel} characters: lowercase letters, digits, and hyphens (no
+      leading or trailing hyphen). The .{domain} suffix is fixed — Bluesky caps
+      the whole handle at 30 characters.
+    </small>
+
+    <label for="did">Bluesky DID</label>
+    <input
+      id="did"
+      type="text"
+      placeholder="did:plc:…"
+      maxlength="200"
+      autocomplete="off"
+      spellcheck="false"
+      required
+      bind:value={did}
+    />
+    <small>
+      Your account's ID, not your username. In the Bluesky app: Settings →
+      Advanced → "Copy your DID".
+    </small>
+
+    <!-- aria-busy is Blades' loading state: it swaps the label for a spinner
+         and keeps the button's width, so the form doesn't jump. -->
+    <button type="submit" aria-busy={submitting} disabled={submitting}>
+      Register
+    </button>
+  </form>
+
+  {#if result}
+    <!-- role="status"/"alert" makes the outcome a live region, so screen
+         readers announce it without the user hunting for the message. -->
+    <article
+      class={result.ok ? 'result-ok' : 'result-error'}
+      role={result.ok ? 'status' : 'alert'}
+    >
+      {result.message}
+    </article>
+  {/if}
+</main>

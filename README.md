@@ -75,7 +75,7 @@ steps for running the binary locally are in [AGENTS.md](AGENTS.md).
 The backend is Go 1.26, a single package under `cmd/niceat/`, standard
 library plus `golang.org/x/time/rate`. Tests are fully self-contained
 (httptest fakes, no network) and live beside the source. The frontend is
-Svelte 5 + Bulma built by Vite into a single `index.html` that is embedded
+Svelte 5 + Blades CSS built by Vite into a single `index.html` that is embedded
 with `go:embed`; the artifact is a build product, not committed, so run
 `pnpm build` in `frontend/` before building or testing the Go side (the
 deploy image does this itself).
