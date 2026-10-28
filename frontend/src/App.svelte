@@ -37,16 +37,18 @@
         const handle = body.handle ?? `${label}.${domain}`
         // The DNS record now (or already) points at the account, but the
         // link is only established once the account adopts the handle
-        // in-app; tell the user that final step explicitly.
+        // in-app.  The user is already in the Bluesky handle dialog (they
+        // copied the DID from it), so the next step is to go back there,
+        // verify, and confirm — name those two buttons explicitly.
         result =
           body.status === 'created'
             ? {
                 ok: true,
-                message: `@${handle} is registered. To activate it, open Bluesky's Settings → Change handle → "I have my own domain", and enter ${handle}.`,
+                message: `DNS record created for @${handle}. Go back to the Bluesky handle dialog and tap "Verify DNS Record" — it may take a few minutes for DNS to become visible. Once verified, tap "Update to ${handle}" to finish.`,
               }
             : {
                 ok: true,
-                message: `@${handle} was already registered to your DID. If that's you, activate it via Settings → Change handle in the Bluesky app.`,
+                message: `@${handle} is already registered to your DID. Go back to the Bluesky handle dialog and tap "Verify DNS Record", then "Update to ${handle}".`,
               }
       } else {
         // 4xx details are written for display to the end user; anything
@@ -84,6 +86,49 @@
     account. It's free, instant, and yours until you stop using it.
   </p>
 
+  <!-- The full flow, numbered so a non-technical user can follow it top to
+       bottom.  Steps 1–3 happen in Bluesky (getting the DID), step 4 is the
+       form below, and steps 5–6 are the return trip to Bluesky.  UI element
+       names are wrapped in <strong> so they stand out as things to tap. -->
+  <h2>How it works</h2>
+  <ol>
+    <li>
+      In the Bluesky app, open <strong>Settings → Account</strong> and tap
+      <strong>Handle</strong> (the @ button). On web, go to
+      <a
+        href="https://bsky.app/settings/account"
+        target="_blank"
+        rel="noopener">bsky.app/settings/account</a
+      >.
+    </li>
+    <li>
+      In the popup, tap <strong>"I have my own domain"</strong> — the last
+      option.
+    </li>
+    <li>
+      Type your full handle, including the domain — for example
+      <code>alice.{domain}</code>. Bluesky shows a line below it starting with
+      <code>did=</code> — <strong>copy that text</strong>.
+    </li>
+    <li>
+      Come back here and fill in the form below: your handle name and the
+      copied DID.
+    </li>
+    <li>
+      Tap <strong>Register</strong> to create the DNS record.
+    </li>
+    <li>
+      Return to the Bluesky dialog and tap <strong>"Verify DNS Record"</strong
+      >. DNS can take a few minutes to become visible — if it fails, wait a
+      moment and try again.
+    </li>
+    <li>
+      Once verified, tap <strong>"Update to your handle"</strong>. That's it —
+      your new handle is live.
+    </li>
+  </ol>
+
+  <h2>Register your handle</h2>
   <form onsubmit={submit}>
     <label for="handle">Handle</label>
     <!-- The field shows the handle as Bluesky will: label plus domain, as one
@@ -109,16 +154,20 @@
       <span class="handle-fill" aria-hidden="true">{#if label}{label}{:else}<span class="handle-placeholder">yourname</span>{/if}<span class="handle-suffix">.{domain}</span></span>
     </div>
     <small id="handle-hint">
+      Just the name part — the .{domain} suffix is added automatically. For
+      example, type <code>alice</code> to claim <code>alice.{domain}</code>.
       3–{maxLabel} characters: lowercase letters, digits, and hyphens (no
-      leading or trailing hyphen). The .{domain} suffix is fixed — Bluesky caps
-      the whole handle at 30 characters.
+      leading or trailing hyphen).
     </small>
 
     <label for="did">Bluesky DID</label>
+    <!-- The placeholder mirrors what Bluesky's handle dialog shows and what
+         the user copies: the full TXT value `did=did:plc:…`.  The backend
+         strips the leading `did=` (see AGENTS.md), so pasting verbatim works. -->
     <input
       id="did"
       type="text"
-      placeholder="did:plc:…"
+      placeholder="did=did:plc:…"
       maxlength="200"
       autocomplete="off"
       spellcheck="false"
@@ -126,8 +175,8 @@
       bind:value={did}
     />
     <small>
-      Your account's ID, not your username. In the Bluesky app: Settings →
-      Advanced → "Copy your DID".
+      The <code>did=…</code> text you copied from Bluesky's handle dialog in
+      step 3 above. It starts with <code>did=did:plc:</code>.
     </small>
 
     <!-- aria-busy is Blades' loading state: it swaps the label for a spinner
