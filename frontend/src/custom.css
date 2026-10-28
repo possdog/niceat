@@ -27,31 +27,100 @@
   color: var(--pico-del-color);
 }
 
-/* Blades has no input-addon component: `role="group"` lays the input and its
-   siblings out side by side, but a sibling `<span>` carries no chrome of its
-   own.  Giving the domain suffix the same box as a form element is what makes
-   it read as "the rest of your handle" instead of text floating next to an
-   input. */
-[role='group'] > .suffix {
-  flex: 0 0 auto; /* the input takes the free space; the suffix keeps its width */
+/* The handle field has to read as the single thing it produces — the full
+   handle `label.domain`, exactly as Bluesky will show it — while only the
+   label is editable.  Blades has no compound field, so Pico's input box moves
+   to the wrapper and the input becomes transparent: `.handle-fill` draws the
+   glyphs, the input still owns the caret, selection and typing, and the domain
+   suffix can never be reached with the cursor. */
+.handle-field {
+  position: relative;
+  overflow: hidden; /* clip the overlay the way an input clips its own text */
+  /* Pico spaces stacked fields with a bottom margin on the input itself; that
+     margin now lives inside this wrapper, where it would only inflate the
+     field, so the field carries the spacing and the input loses it. */
+  margin-bottom: var(--pico-spacing);
+  border: var(--pico-border-width) solid var(--pico-form-element-border-color);
+  border-radius: var(--pico-border-radius);
+  background-color: var(--pico-form-element-background-color);
+  transition:
+    background-color var(--pico-transition),
+    border-color var(--pico-transition),
+    box-shadow var(--pico-transition);
+}
+
+.handle-field:focus-within {
+  border-color: var(--pico-form-element-active-border-color);
+  background-color: var(--pico-form-element-active-background-color);
+  box-shadow: 0 0 0 var(--pico-outline-width) var(--pico-form-element-focus-color);
+}
+
+/* The input keeps Pico's padding and height — so the whole box is clickable and
+   the text sits where an input puts it — but gives up its own chrome and its
+   own margin (see .handle-field above).  Its glyphs are transparent: only the
+   caret and the selection stay visible. */
+.handle-field > input {
+  position: relative; /* paints above the overlay */
+  z-index: 1;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: transparent;
+  caret-color: var(--pico-form-element-color);
+}
+
+/* Overlay and input must share their text metrics to the pixel, or the suffix
+   drifts away from the label it is appended to.  The overlay is sized by
+   inset: 0, so the height below is the input's alone. */
+.handle-field > input,
+.handle-fill {
+  height: calc(1rem * var(--pico-line-height) + var(--pico-form-element-spacing-vertical) * 2);
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: var(--pico-font-weight);
+  letter-spacing: inherit;
+  line-height: var(--pico-line-height);
+}
+
+.handle-fill {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
-  /* The group pulls its neighbours together by a border width, but only for
-     form elements Pico knows about; collapse the shared border here so the
-     input and the suffix don't show a double line. */
-  margin-left: calc(var(--pico-border-width) * -1);
   padding-inline: var(--pico-form-element-spacing-horizontal);
-  border: var(--pico-border-width) solid var(--pico-form-element-border-color);
-  border-radius: 0 var(--pico-border-radius) var(--pico-border-radius) 0;
-  background-color: var(--pico-form-element-background-color);
+  overflow: hidden;
+  /* `pre`, not `nowrap`: the overlay has to mirror the typed text exactly,
+     spaces included, since it stands in for the input's own glyphs. */
+  white-space: pre;
+  color: var(--pico-form-element-color);
+}
+
+/* Muted, because the domain is the fixed part: what the visitor types ends
+   where the muted text begins. */
+.handle-suffix {
   color: var(--pico-muted-color);
-  white-space: nowrap;
+}
+
+/* The sample name stands in for the input's placeholder — the attribute itself
+   is no use here, because its `::placeholder` would render visible text on top
+   of the overlay's.  The value case is the template's `{#if}`; this is the
+   focus case, and it is stricter than a native placeholder, which stays visible
+   under a caret in an empty field: here it yields on focus, so the field reads
+   ".wagg.ing" with the caret directly before the suffix. */
+.handle-placeholder {
+  color: var(--pico-form-element-placeholder-color);
+}
+
+.handle-field:focus-within .handle-placeholder {
+  display: none;
 }
 
 /* Pico styles helper text only when a `<small>` directly follows an input.
-   The handle field's input sits inside the group above, so the hint after it
+   The handle field's input sits inside the wrapper above, so the hint after it
    would otherwise render as un-muted, unspaced body text. */
-[role='group'] + small {
+.handle-field + small {
   display: block;
   width: 100%;
   margin-top: calc(var(--pico-spacing) * -0.75);

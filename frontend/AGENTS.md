@@ -45,9 +45,23 @@ single `index.html` like any other CSS import. It holds exactly three
 exceptions today: `.narrow` (Blades' `.container` is document-sized, up to
 1200px, and `blades.css` omits Pico's landmark padding), the
 `.result-ok`/`.result-error` accent (Blades ships no alert component), and
-the `[role="group"]` addon rules that give the handle field's `.{domain}`
-suffix form-element chrome and keep the hint under it styled like helper
-text (Blades groups inputs with addons but styles no addon itself).
+the `.handle-field` rules that let the handle field display the composed
+handle while keeping the domain uneditable (see below).
+
+The handle field's suffix is a special case worth knowing about: the field
+must *display* the composed handle (`label.domain`) exactly as Bluesky will
+show it, but only the label may be editable, so the input holds the label
+alone with transparent glyphs and `.handle-fill` draws `label.domain` beneath
+it — the caret, selection and typing stay inside the label and the domain is
+unreachable with the cursor.  When the field is empty the overlay draws a
+sample name (`yourname`) in Pico's placeholder color instead, so an untouched
+field still reads as a whole handle; like a native placeholder it yields on
+focus, leaving the caret directly before the suffix.  Two invariants keep
+that honest: the overlay
+and the input must share text metrics exactly (hence the shared font/height
+block in `custom.css`), and the input's `maxlength` is the label budget left
+by Bluesky's 30-character cap, so the composed string always fits the field
+instead of scrolling away from the overlay.
 
 ## Architecture notes
 

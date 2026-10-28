@@ -4,6 +4,13 @@
   // selection.  No server-side markup parameterization is needed.
   const domain = location.hostname
 
+  // bsky.app refuses custom-domain handles longer than 30 characters in total
+  // (see AGENTS.md, "Composed handle"), so the label budget is whatever the
+  // served domain leaves over.  Bounding the input to it also keeps the
+  // composed handle inside the field instead of scrolling out of it, which
+  // matters because the field's visible text is the full composed handle.
+  const maxLabel = Math.max(3, 30 - `.${domain}`.length)
+
   let label = $state('')
   let did = $state('')
   let submitting = $state(false)
@@ -79,29 +86,32 @@
 
   <form onsubmit={submit}>
     <label for="handle">Handle</label>
-    <!-- role="group" is Blades' input-with-addon layout: the field then reads
-         as the full handle the visitor is claiming, typed label plus domain,
-         rather than as a bare label input. -->
-    <div role="group">
+    <!-- The field shows the handle as Bluesky will: label plus domain, as one
+         string.  Only the label is editable, so the input carries it alone and
+         its own glyphs are transparent — `.handle-fill` draws `label.domain`
+         underneath, which leaves the caret, selection and typing inside the
+         label and makes the domain unreachable with the cursor. -->
+    <div class="handle-field">
       <input
         id="handle"
         type="text"
-        placeholder="yourname"
-        maxlength="63"
+        maxlength={maxLabel}
         autocomplete="off"
         spellcheck="false"
         required
         bind:value={label}
-        aria-describedby="handle-domain handle-hint"
+        aria-describedby="handle-hint"
       />
-      <!-- The suffix is part of the field, not prose: describing the input
-           with it (aria-describedby) is what tells a screen reader the domain
-           the typed label is appended to. -->
-      <span id="handle-domain" class="suffix">.{domain}</span>
+      <!-- One line on purpose: the overlay's text must contain no whitespace
+           between the label and the suffix, or the field would show a gap.
+           While the field is empty the `{#if}` swaps in a sample name, so an
+           untouched field still reads as a whole handle. -->
+      <span class="handle-fill" aria-hidden="true">{#if label}{label}{:else}<span class="handle-placeholder">yourname</span>{/if}<span class="handle-suffix">.{domain}</span></span>
     </div>
     <small id="handle-hint">
-      3–63 characters: lowercase letters, digits, and hyphens (no leading or
-      trailing hyphen).
+      3–{maxLabel} characters: lowercase letters, digits, and hyphens (no
+      leading or trailing hyphen). The .{domain} suffix is fixed — Bluesky caps
+      the whole handle at 30 characters.
     </small>
 
     <label for="did">Bluesky DID</label>
