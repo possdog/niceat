@@ -202,7 +202,7 @@ cmd/niceat/
 ├── web/           — frontend build artifact (index.html), gitignored build product
 └── *_test.go      — tests alongside source, fakes in helpers_test.go / porkbun_test.go
 
-frontend/           — Svelte 5 + Bulma + Vite source; pnpm build emits cmd/niceat/web/index.html
+frontend/           — Svelte 5 + Blades CSS + Vite source; pnpm build emits cmd/niceat/web/index.html
 ```
 
 One third-party dependency exists alongside the standard library, matching
@@ -232,7 +232,7 @@ while the deployment is a single instance.
 
 ## Frontend
 
-`frontend/` is a Svelte 5 (runes) + Bulma v1 + Vite 8 app built with
+`frontend/` is a Svelte 5 (runes) + Blades CSS + Vite 8 app built with
 `vite-plugin-singlefile` into one self-contained `index.html` (all JS and
 CSS inlined), emitted directly into `cmd/niceat/web/` for `go:embed`.  The
 Go server serves it unchanged at `/` on every managed domain:
@@ -243,8 +243,8 @@ header carries the domain selection.  The server does no per-Host markup.
 
 The artifact is gitignored (see Build & run): `go build` and the tests need
 it present, so run `pnpm build` in `frontend/` before working on the Go
-side.  For frontend-specific conventions (pnpm, Bulma-over-custom-CSS, no
-SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
+side.  For frontend-specific conventions (pnpm, classless-Blades-over-custom-
+CSS, no SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
 `/register` to a locally running Go server with the Host forced to
 `wagg.ing` (the dev niceat.json must list it).
 

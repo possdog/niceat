@@ -1,6 +1,6 @@
 # AGENTS.md — niceat frontend
 
-The registration form for niceat. Svelte 5 (runes) + Bulma v1 + Vite 8,
+The registration form for niceat. Svelte 5 (runes) + Blades CSS + Vite 8,
 built with `vite-plugin-singlefile` into a **single `index.html`** with all
 JavaScript and CSS inlined — the Go server embeds exactly that one file and
 serves it on every managed domain. Do not add SvelteKit, SSR, multiple entry
@@ -25,12 +25,29 @@ Package manager: pnpm.
 
 ## Styling
 
-**Always avoid writing custom CSS unless Bulma is simply not up to the
+**Blades CSS (`@anyblades/blades`) is classless**, so express intent with
+the right element, role, and ARIA state — `<button type="submit">`,
+`aria-busy="true"` for a loading button, `aria-invalid` for a rejected
+field — instead of adding classes. Its vocabulary is Pico CSS's (Blades is
+Pico's maintained successor), so Pico's docs apply as-is. Light and dark
+mode come from Pico's `light-dark()` palette: never write a
+`prefers-color-scheme` block, override `--pico-*` variables at most. The
+minified build is imported once, in `src/main.ts`; the package's exports map
+resolves `.` to a stylesheet, which TypeScript cannot type, hence the
+explicit `css/blades.min.css` path.
+
+**Always avoid writing custom CSS unless Blades is simply not up to the
 task.** When an exception is unavoidable, keep it narrowly scoped (one
 component or one utility) and comment why.  Custom CSS lives in
-`src/custom.css`, imported in `src/main.ts` right after Bulma so overrides
+`src/custom.css`, imported in `src/main.ts` right after Blades so overrides
 win at equal specificity; `vite-plugin-singlefile` inlines it into the
-single `index.html` like any other CSS import.
+single `index.html` like any other CSS import. It holds exactly three
+exceptions today: `.narrow` (Blades' `.container` is document-sized, up to
+1200px, and `blades.css` omits Pico's landmark padding), the
+`.result-ok`/`.result-error` accent (Blades ships no alert component), and
+the `[role="group"]` addon rules that give the handle field's `.{domain}`
+suffix form-element chrome and keep the hint under it styled like helper
+text (Blades groups inputs with addons but styles no addon itself).
 
 ## Architecture notes
 

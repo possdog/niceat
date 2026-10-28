@@ -8,9 +8,9 @@ importers:
 
   .:
     dependencies:
-      bulma:
-        specifier: ^1.0.4
-        version: 1.0.4
+      '@anyblades/blades':
+        specifier: 3.1.0-beta.6
+        version: 3.1.0-beta.6
     devDependencies:
       '@sveltejs/vite-plugin-svelte':
         specifier: ^7.3.1
@@ -38,6 +38,9 @@ importers:
         version: 2.3.4(vite@8.3.4(@types/node@24.19.2))
 
 packages:
+
+  '@anyblades/blades@3.1.0-beta.6':
+    resolution: {integrity: sha512-nWKtT6ULFW7k6fUKYfpP7MdEbyjdJV/TARSeL3qISVtVkSglLeWuRKjf3sLkbEioPrzjDbdGpWimCSugQ6bxrg==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -194,9 +197,6 @@ packages:
   axobject-query@4.1.0:
     resolution: {integrity: sha512-qIj0G9wZbMGNLjLmg1PT6v2mE9AH2zlnADJD/2tC6E00hgmhUOfEB6greHPAfLRSufHqROIUTkw6E+M3lH0PTQ==}
     engines: {node: '>= 0.4'}
-
-  bulma@1.0.4:
-    resolution: {integrity: sha512-Ffb6YGXDiZYX3cqvSbHWqQ8+LkX6tVoTcZuVB3lm93sbAVXlO0D6QlOTMnV6g18gILpAXqkG2z9hf9z4hCjz2g==}
 
   chokidar@4.0.3:
     resolution: {integrity: sha512-Qgzu8kfBvo+cA4962jnP1KkS6Dop5NS6g7R5LFYJr4b8Ub94PPQXUksCw9PvXoeXPRRddRNC5C1JQUR2SMGtnA==}
@@ -459,6 +459,8 @@ packages:
 
 snapshots:
 
+  '@anyblades/blades@3.1.0-beta.6': {}
+
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
       '@jridgewell/sourcemap-codec': 1.6.0
@@ -555,8 +557,6 @@ snapshots:
   aria-query@5.3.1: {}
 
   axobject-query@4.1.0: {}
-
-  bulma@1.0.4: {}
 
   chokidar@4.0.3:
     dependencies:

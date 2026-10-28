@@ -10,10 +10,6 @@
   // $state.raw: reassigned wholesale, never mutated, so no proxy is needed.
   let result = $state.raw<{ ok: boolean; message: string } | null>(null)
 
-  // clsx-style join helper for Bulma class lists built from conditionals.
-  const cx = (...parts: (string | false | undefined)[]) =>
-    parts.filter(Boolean).join(' ')
-
   async function submit(event: SubmitEvent) {
     event.preventDefault()
     if (submitting) return
@@ -67,90 +63,78 @@
   }
 </script>
 
-<section class="section">
-  <div class="container">
-    <div class="columns is-centered">
-      <div class="column is-half-desktop">
-        <h1 class="title">Claim your handle</h1>
-        <p class="subtitle">
-          a Bluesky handle under <strong>{domain}</strong>
-        </p>
+<!-- Blades is classless: every element below is styled from its tag, role
+     and ARIA state, so `container narrow` (see custom.css) is the only
+     styling hook the page needs. -->
+<main class="container narrow">
+  <hgroup>
+    <h1>Claim your handle</h1>
+    <p>a Bluesky handle under <strong>{domain}</strong></p>
+  </hgroup>
 
-        <p>
-          Registering creates the DNS record that binds the handle to your
-          Bluesky account. It's free, instant, and yours until you stop
-          using it.
-        </p>
+  <p>
+    Registering creates the DNS record that binds the handle to your Bluesky
+    account. It's free, instant, and yours until you stop using it.
+  </p>
 
-        <form onsubmit={submit}>
-          <div class="field">
-            <label class="label" for="handle">Handle</label>
-            <div class="field has-addons">
-              <p class="control is-expanded">
-                <input
-                  id="handle"
-                  class="input"
-                  type="text"
-                  placeholder="yourname"
-                  maxlength="63"
-                  autocomplete="off"
-                  spellcheck="false"
-                  required
-                  bind:value={label}
-                />
-              </p>
-              <p class="control">
-                <span class="button is-static">.{domain}</span>
-              </p>
-            </div>
-            <p class="help">
-              3–63 characters: lowercase letters, digits, and hyphens (no
-              leading or trailing hyphen).
-            </p>
-          </div>
-
-          <div class="field">
-            <label class="label" for="did">Bluesky DID</label>
-            <div class="control">
-              <input
-                id="did"
-                class="input"
-                type="text"
-                placeholder="did:plc:…"
-                maxlength="200"
-                autocomplete="off"
-                spellcheck="false"
-                required
-                bind:value={did}
-              />
-            </div>
-            <p class="help">
-              Your account's ID, not your username. In the Bluesky app:
-              Settings → Advanced → "Copy your DID".
-            </p>
-          </div>
-
-          <div class="field">
-            <div class="control">
-              <button
-                type="submit"
-                class={cx('button is-primary', submitting && 'is-loading')}
-                disabled={submitting}
-              >
-                Register
-              </button>
-            </div>
-          </div>
-        </form>
-
-        {#if result}
-          <article
-            class={cx('message', result.ok ? 'is-success' : 'is-danger')}
-          >
-            <div class="message-body">{result.message}</div>
-          </article>
-        {/if}
-      </div>
+  <form onsubmit={submit}>
+    <label for="handle">Handle</label>
+    <!-- role="group" is Blades' input-with-addon layout: the field then reads
+         as the full handle the visitor is claiming, typed label plus domain,
+         rather than as a bare label input. -->
+    <div role="group">
+      <input
+        id="handle"
+        type="text"
+        placeholder="yourname"
+        maxlength="63"
+        autocomplete="off"
+        spellcheck="false"
+        required
+        bind:value={label}
+        aria-describedby="handle-domain handle-hint"
+      />
+      <!-- The suffix is part of the field, not prose: describing the input
+           with it (aria-describedby) is what tells a screen reader the domain
+           the typed label is appended to. -->
+      <span id="handle-domain" class="suffix">.{domain}</span>
     </div>
-  </div>
-</section>
+    <small id="handle-hint">
+      3–63 characters: lowercase letters, digits, and hyphens (no leading or
+      trailing hyphen).
+    </small>
+
+    <label for="did">Bluesky DID</label>
+    <input
+      id="did"
+      type="text"
+      placeholder="did:plc:…"
+      maxlength="200"
+      autocomplete="off"
+      spellcheck="false"
+      required
+      bind:value={did}
+    />
+    <small>
+      Your account's ID, not your username. In the Bluesky app: Settings →
+      Advanced → "Copy your DID".
+    </small>
+
+    <!-- aria-busy is Blades' loading state: it swaps the label for a spinner
+         and keeps the button's width, so the form doesn't jump. -->
+    <button type="submit" aria-busy={submitting} disabled={submitting}>
+      Register
+    </button>
+  </form>
+
+  {#if result}
+    <!-- role="status"/"alert" makes the outcome a live region, so screen
+         readers announce it without the user hunting for the message. -->
+    <article
+      class={result.ok ? 'result-ok' : 'result-error'}
+      role={result.ok ? 'status' : 'alert'}
+    >
+      {result.message}
+    </article>
+  {/if}
+</main>
