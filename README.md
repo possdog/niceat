@@ -1,5 +1,7 @@
 # niceat
 
+> 🤖 This code was written by a human-led AI agent.
+
 niceat is a small web service that lets a community hand out Bluesky
 handles under a domain it owns. Visitors fill in a form with the handle
 label they want and their account DID; the service publishes the
