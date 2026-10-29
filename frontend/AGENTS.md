@@ -41,12 +41,17 @@ task.** When an exception is unavoidable, keep it narrowly scoped (one
 component or one utility) and comment why.  Custom CSS lives in
 `src/custom.css`, imported in `src/main.ts` right after Blades so overrides
 win at equal specificity; `vite-plugin-singlefile` inlines it into the
-single `index.html` like any other CSS import. It holds exactly three
+single `index.html` like any other CSS import. It holds exactly five
 exceptions today: `.narrow` (Blades' `.container` is document-sized, up to
 1200px, and `blades.css` omits Pico's landmark padding), the
-`.result-ok`/`.result-error` accent (Blades ships no alert component), and
-the `.handle-field` rules that let the handle field display the composed
-handle while keeping the domain uneditable (see below).
+`.result-ok`/`.result-error` accent (Blades ships no alert component), the
+`.handle-field` rules that let the handle field display the composed
+handle while keeping the domain uneditable (see below), the `.flow`
+rules that turn the registration `<ol>` into a guided step list — green
+markers on completed steps, muted text on not-yet-relevant steps, and a
+card background on the focused step (Blades has no concept of step state),
+and the `footer` rule that mutes the page footer (Blades styles `<footer>`
+only inside blockquotes and articles, not as a page footer).
 
 The handle field's suffix is a special case worth knowing about: the field
 must *display* the composed handle (`label.domain`) exactly as Bluesky will
