@@ -27,14 +27,17 @@ func TestServeIndexPage(t *testing.T) {
 
 // TestServeIndexHardeningHeaders pins the security headers of the served
 // page (audit INFO-8).  The CSP is asserted exactly so that a future
-// frontend change that adds a subresource (a font, an image, an external
-// script) fails loudly here until the policy is widened on purpose —
+// frontend change that adds a subresource (a font, an external image, an
+// external script) fails loudly here until the policy is widened on purpose —
 // every directive is derived from the current single-file page's needs
-// (see the comment in web.go).
+// (see the comment in web.go).  img-src admits data: URIs only, for the
+// favicon the build inlines into the page (the embed serves no external
+// files) — not any network-loaded image.
 func TestServeIndexHardeningHeaders(t *testing.T) {
 	const wantCSP = "default-src 'none'; base-uri 'none'; form-action 'self'; " +
 		"frame-ancestors 'none'; object-src 'none'; " +
-		"script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"
+		"script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+		"connect-src 'self'; img-src data:"
 
 	a := newTestApp(t, &fakeProvisioner{})
 	w := doRegisterMux(t, a, http.MethodGet, "/", "")

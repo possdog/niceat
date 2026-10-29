@@ -8,6 +8,18 @@ points, or anything that emits an external asset reference: it would 404 in
 production. No SvelteKit also means no server routes; the backend is the Go
 server.
 
+The favicon (`src/assets/favicon.png` — Vite's home for build-processed
+assets, deliberately not `public/`, which means "copy verbatim as an
+external file") is subject to the same single-file rule:
+`vite-plugin-singlefile` inlines only JS and CSS, so the
+`inlineFavicon` plugin in vite.config.ts reads the PNG and injects a
+`<link rel="icon">` with a `data:` URI via `transformIndexHtml` — that
+hook also runs under `pnpm dev`, so the dev server shows the icon too.
+The Go side's CSP admits it via `img-src data:` (see cmd/niceat/web.go);
+to change the artwork, replace the PNG (keep it modest — it is
+base64-inlined into every page load, so it ships at 256x256, not
+design-source resolution).
+
 ## Commands
 
 - `pnpm dev` — Vite dev server with `/register` proxied to a locally running

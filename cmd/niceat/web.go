@@ -40,12 +40,15 @@ func (a *app) serveIndex(w http.ResponseWriter, r *http.Request) {
 	// style-src must allow 'unsafe-inline' (the only alternative is a build
 	// change emitting a nonce-able external file, which the embed setup rules
 	// out); the form posts same-origin via fetch("/register"), so
-	// connect-src 'self'.  The page loads no images, fonts, frames, or other
-	// subresources, hence default-src 'none' for everything else.
+	// connect-src 'self'.  img-src admits only data: URIs — the inlined
+	// favicon (a data: URI because the embed serves no external files), and
+	// nothing that could make a network request.  The page loads no fonts,
+	// frames, or other subresources, hence default-src 'none' for the rest.
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; base-uri 'none'; form-action 'self'; "+
 			"frame-ancestors 'none'; object-src 'none'; "+
-			"script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+			"script-src 'unsafe-inline'; style-src 'unsafe-inline'; "+
+			"connect-src 'self'; img-src data:")
 	// Browsers must not MIME-sniff the page away from the declared
 	// text/html (e.g. into an executable type on a crafted response).
 	w.Header().Set("X-Content-Type-Options", "nosniff")

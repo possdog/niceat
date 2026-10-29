@@ -267,8 +267,13 @@ Bluesky*" (the equivalent on vore.rip) and posts the form same-origin, so the Ho
 header carries the domain selection.  The server does no per-Host markup.
 `serveIndex` (web.go) sends a strict `Content-Security-Policy`
 (`default-src 'none'` plus inline script/style allowances — the
-single-file bundle inlines everything — and `connect-src 'self'` for
-the form POST) and `X-Content-Type-Options: nosniff`; `web_test.go`
+single-file bundle inlines everything — `connect-src 'self'` for
+the form POST, and `img-src data:` for the favicon, which the build
+inlines as a data URI: `src/assets/favicon.png` in frontend/ is
+injected by the `inlineFavicon` plugin in vite.config.ts since the
+singlefile plugin inlines only JS/CSS and the embed serves no external
+files) and
+`X-Content-Type-Options: nosniff`; `web_test.go`
 pins the exact value, so a new frontend subresource fails loudly until
 the policy is widened deliberately.
 
