@@ -96,13 +96,17 @@
      gets a subtle card background. -->
 <main class="container narrow">
   <hgroup>
-    <h1>Claim your handle</h1>
-    <p>a Bluesky handle under <strong>{domain}</strong></p>
+    <h1>Get yourself a <code>{domain}</code> handle on Bluesky</h1>
+    <p>
+      Much like pouring river water in your socks, it's quick, it's easy, and
+      it's free
+    </p>
   </hgroup>
 
   <p>
-    Registering creates the DNS record that binds the handle to your Bluesky
-    account. It's free, instant, and yours until you stop using it.
+    This page sets up the DNS record that ties your Bluesky account to a handle
+    under this domain. Follow the steps below to grab one. The handle
+    is yours to keep for as long as I can help it.
   </p>
 
   <form onsubmit={submit}>
@@ -121,7 +125,9 @@
         In the popup, tap <strong>"I have my own domain"</strong> (the last option).
       </li>
       <li>
-        Type your full handle, <strong>including the domain</strong> (for example, <code>yourname.{domain}</code>). A few lines down, you'll see some text starting with
+        Type your full handle, <strong>including the domain</strong> (for
+        example, <code>yourname.{domain}</code>). A few lines down, you'll see
+        some text starting with
         <code>did=</code>
         — <strong>copy that entire line</strong>.
       </li>
@@ -157,7 +163,8 @@
           >
         </div>
         <small id="handle-hint">
-          Just the name part this time; the <code>.{domain}</code> suffix will be added for you. 3–{maxLabel}
+          Just the name part this time; the <code>.{domain}</code> suffix will
+          be added for you. 3–{maxLabel}
           characters: lowercase letters, digits, and hyphens (no leading or trailing
           hyphen).
         </small>
@@ -217,12 +224,13 @@
       <!-- Steps 7–8 happen back in Bluesky.  They stay muted until the
            registration succeeds, then light up as the next thing to do. -->
       <li class:pending={!registered}>
-        Return to Bluesky and tap <strong>"Verify DNS Record"</strong
-        >. DNS can take a few minutes to become visible, so if it fails, wait a
-        few moments and try again.
+        Return to Bluesky and tap <strong>"Verify DNS Record"</strong>. DNS can
+        take a few minutes to become visible, so if it fails, wait a few moments
+        and try again.
       </li>
       <li class:pending={!registered}>
-        Once verified, tap <strong>"Update to your handle"</strong>. The handle is now yours!
+        Once verified, tap <strong>"Update to your handle"</strong>. The handle
+        is now yours!
       </li>
       <li class:pending={!registered}>
         (Optional) Help me pay for this domain by <a

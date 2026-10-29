@@ -262,8 +262,8 @@ OOM vector) without weakening the same-label serialization.
 CSS inlined), emitted directly into `cmd/niceat/web/` for `go:embed`.  The
 Go server serves it unchanged at `/` on every managed domain:
 the domain parameterization is **client-side** — the page reads
-`location.hostname` to show "*a Bluesky handle under wagg.ing*" (the
-equivalent on vore.rip) and posts the form same-origin, so the Host
+`location.hostname` to show "*Get yourself a wagg.ing handle on
+Bluesky*" (the equivalent on vore.rip) and posts the form same-origin, so the Host
 header carries the domain selection.  The server does no per-Host markup.
 `serveIndex` (web.go) sends a strict `Content-Security-Policy`
 (`default-src 'none'` plus inline script/style allowances — the

@@ -20,7 +20,7 @@ func TestServeIndexPage(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/html; charset=utf-8")
 	}
-	if !strings.Contains(w.Body.String(), "Claim your handle") {
+	if !strings.Contains(w.Body.String(), "Get yourself a") {
 		t.Errorf("page body does not contain the app markup (len %d)", w.Body.Len())
 	}
 }
