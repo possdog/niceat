@@ -104,9 +104,13 @@ global fallback pair — a shared pair would defeat the per-domain scoping's
 blast-radius containment.  The same document can instead come from the
 environment variable `PORKBUN_CREDENTIALS` (the Fly.io path).  Env wins
 over the file — that is Fly.io's secrets model (`fly secrets set`), and a
-stale local-dev file must not shadow what the operator set.  Current keys
-are sandbox (`pk1_sb_`/`sk1_sb_`, scoped to the sandbox account's one probe
-domain): Porkbun requests are simulated, so live smoke tests are safe.
+stale local-dev file must not shadow what the operator set.  The
+sandbox pair (`pk1_sb_`/`sk1_sb_`, scoped to the sandbox account's one
+probe domain, `niceat-probe-7q4k9x.com`) lives in
+`porkbun_sandbox_keys.json` — the same domain-keyed document format as
+`porkbun_keys.json`, so a sandbox session is just that file copied over
+`porkbun_keys.json` (with `niceat.json` listing the probe domain).
+Porkbun sandbox requests are simulated, so live smoke tests are safe.
 
 ## The API (what exists today)
 
