@@ -127,3 +127,59 @@
   margin-bottom: var(--pico-spacing);
   color: var(--pico-muted-color);
 }
+
+/* The registration flow: an <ol> whose <li> elements are the steps, with
+   form fields interleaved into the steps they belong to.  Blades has no
+   concept of a guided multi-step list, so three narrowly-scoped states turn
+   a plain numbered list into one that responds to the user:
+
+   - .done — the step's action is complete (field filled, registration
+     succeeded): the marker turns green.
+   - .pending — the step isn't relevant yet (post-registration steps before
+     the form is submitted): the text and marker are muted.
+   - :focus-within — the step whose field the user is interacting with: a
+     subtle card background draws the eye to the current step.
+
+   Transitions on color keep the state changes smooth rather than jarring. */
+.flow li {
+  transition:
+    background-color var(--pico-transition),
+    color var(--pico-transition);
+}
+
+.flow li::marker {
+  transition: color var(--pico-transition);
+}
+
+.flow li.done::marker {
+  color: var(--pico-ins-color);
+}
+
+.flow li.pending,
+.flow li.pending::marker {
+  color: var(--pico-muted-color);
+}
+
+/* Links inside a pending step must read as muted too, but Blades sets
+   `--pico-color: var(--pico-primary)` directly on the <a>, overriding the
+   inherited color.  Overriding the custom properties (not the resolved
+   `color`) inside :where() keeps the specificity below Blades' own
+   :hover/:focus rules, so the link still lights up on interaction. */
+:where(.flow li.pending) a {
+  --pico-color: var(--pico-muted-color);
+  --pico-underline: var(--pico-muted-color);
+}
+
+.flow li:focus-within {
+  background-color: var(--pico-card-background-color);
+  border-radius: var(--pico-border-radius);
+}
+
+/* Blades styles <footer> only inside blockquotes and articles, so a page
+   footer gets no treatment of its own.  A muted credit line just needs the
+   muted color and a top margin to separate it from the flow above; the
+   <small> inside handles the smaller font size. */
+footer {
+  margin-top: var(--pico-spacing);
+  color: var(--pico-muted-color);
+}
