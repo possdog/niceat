@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,6 +37,14 @@ const (
 	// porkbunMaxResponse caps how much of a Porkbun response we buffer;
 	// the responses we use are tiny, and a bounded read cannot be abused.
 	porkbunMaxResponse = 1 << 20 // 1 MiB
+	// zoneListingTTL bounds how long a cached zone listing may serve the
+	// registration path's availability and per-DID cap lookups.  Single-
+	// digit seconds: long enough that a burst of probes shares one
+	// Porkbun call (the shared per-domain key is the exhaustible
+	// resource), short enough that a claim made outside this process — a
+	// manual Porkbun edit, another instance — is honored almost
+	// immediately.
+	zoneListingTTL = 5 * time.Second
 )
 
 // Grace-marker constants: the reaper stores its grace clocks in the zone
@@ -63,6 +72,14 @@ const (
 // record already exists.  It is a sentinel (not a wrapped error) so callers
 // can branch on it with errors.Is.
 var errDuplicateRecord = errors.New("porkbun: duplicate record")
+
+// errBackendUnavailable reports that Porkbun could not serve the request:
+// an HTML error page (what the API serves when the key is over its rate
+// limit) or an HTTP 429/5xx status.  Every visitor of a domain shares that
+// domain's single API key, so this is a whole-domain condition — callers
+// shed load (503 + Retry-After) instead of answering 500 as if each
+// individual request had failed.
+var errBackendUnavailable = errors.New("porkbun: backend unavailable")
 
 // porkbunCreds is one domain's Porkbun API key pair, as scoped in the
 // Porkbun dashboard (dns scope, that domain only).
@@ -97,10 +114,18 @@ type porkbunCreds struct {
 // domain that is interpolated into the endpoint path, so a request for one
 // community can never be authenticated (or billed, or rate-limited) with
 // another's key.
+//
+// The listing cache is deliberately NOT a claim ledger: DNS remains the
+// claim store.  The cache only saves Porkbun calls, and every write this
+// process makes drops the affected zone's entry (see call), so this
+// process's own records are always visible to the next lookup.
 type porkbunProvisioner struct {
 	creds   map[string]porkbunCreds
 	baseURL string
 	hc      *http.Client
+	// cache briefly holds each domain's zone listing for the
+	// registration path; see zoneCache.
+	cache zoneCache
 }
 
 // newPorkbunProvisioner returns a client for the given per-domain
@@ -275,6 +300,16 @@ func (p *porkbunProvisioner) call(ctx context.Context, domain, path string, body
 	if !ok {
 		return pbEnvelope{}, fmt.Errorf("porkbun: no credentials loaded for %s", domain)
 	}
+	// Every create and delete changes the zone the listing cache
+	// describes, so the cached listing must go — unconditionally,
+	// including when the call below fails.  A create whose response was
+	// lost may still have landed, and a listing stale enough to miss a
+	// just-written record could pass an availability check and stack a
+	// second TXT record (breaking the handle for both parties).  A lost
+	// cache entry only costs one extra listing.
+	if strings.HasPrefix(path, "/dns/create/") || strings.HasPrefix(path, "/dns/delete/") {
+		defer p.invalidateZone(domain)
+	}
 	body["apikey"] = c.apiKey
 	body["secretapikey"] = c.secretKey
 	payload, err := json.Marshal(body)
@@ -292,9 +327,22 @@ func (p *porkbunProvisioner) call(ctx context.Context, domain, path string, body
 	}
 	defer resp.Body.Close()
 
+	// HTTP 429/5xx is Porkbun (or a proxy in front of it) refusing to
+	// serve the request — most importantly the shared per-domain key
+	// being over its rate limit, which takes the whole domain's
+	// registrations down with it.  Classify it as backend unavailability
+	// so the handler can shed load (503) rather than answer 500 as if
+	// each individual request had failed.
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError {
+		return pbEnvelope{}, fmt.Errorf("%w: HTTP %d", errBackendUnavailable, resp.StatusCode)
+	}
+
 	var env pbEnvelope
 	if err := json.NewDecoder(io.LimitReader(resp.Body, porkbunMaxResponse)).Decode(&env); err != nil {
-		return pbEnvelope{}, fmt.Errorf("decoding response: %w", err)
+		// A body that is not JSON is what a rate-limited key gets: an
+		// HTML error page (observed live).  That is the same shared-key
+		// condition as a 429, so it classifies the same way.
+		return pbEnvelope{}, fmt.Errorf("decoding response: %v: %w", err, errBackendUnavailable)
 	}
 	if env.Status != "SUCCESS" {
 		if env.Code == porkbunDuplicateCode {
@@ -305,28 +353,104 @@ func (p *porkbunProvisioner) call(ctx context.Context, domain, path string, body
 	return env, nil
 }
 
+// zoneCache briefly caches each managed domain's zone listing for the
+// registration path.  Every visitor of a domain shares that domain's single
+// Porkbun API key, and each uncached registration costs a full zone
+// listing; aggregate probing (IP rotation defeats the per-IP limiter) can
+// push the shared key over Porkbun's rate limit, which takes down every
+// registration for the domain.  The cache bounds that pressure without
+// becoming a ledger: writes invalidate (see call), the TTL is short, and
+// the reaper never reads through it.
+type zoneCache struct {
+	// mu guards the zones map only; each entry carries its own lock, so
+	// one zone's in-flight fetch never blocks another zone's.
+	mu    sync.Mutex
+	zones map[string]*zoneEntry
+}
+
+// zoneEntry is one domain's cached listing.  records is never mutated
+// after being stored here — invalidateZone replaces the pointer — so
+// callers may iterate a returned slice without holding the lock.
+type zoneEntry struct {
+	mu      sync.Mutex
+	records []pbRecord
+	expires time.Time
+}
+
+// entry returns the cache slot for domain, creating it on first use.
+func (c *zoneCache) entry(domain string) *zoneEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.zones == nil {
+		c.zones = make(map[string]*zoneEntry)
+	}
+	e := c.zones[domain]
+	if e == nil {
+		e = &zoneEntry{}
+		c.zones[domain] = e
+	}
+	return e
+}
+
+// zoneRecords returns the domain's current zone listing, from the cache
+// when it is fresh.  The entry lock is held across the Porkbun fetch,
+// which serializes fetches per zone and closes the dangerous ordering: an
+// invalidation from a concurrent write can only run BEFORE the fetch
+// acquires the lock (the fetch then sees the written zone) or AFTER the
+// fetch stores (the invalidation immediately clears what was stored) — a
+// listing that predates a write can never survive that write.
+func (p *porkbunProvisioner) zoneRecords(ctx context.Context, domain string) ([]pbRecord, error) {
+	e := p.cache.entry(domain)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.expires.After(time.Now()) {
+		return e.records, nil
+	}
+	env, err := p.call(ctx, domain, "/dns/retrieve/"+domain, map[string]string{})
+	if err != nil {
+		return nil, err
+	}
+	e.records = env.Records
+	e.expires = time.Now().Add(zoneListingTTL)
+	return e.records, nil
+}
+
+// invalidateZone drops the cached listing for domain so the next lookup
+// re-fetches fresh truth.  Called on every create and delete against the
+// zone (see call): a stale listing that missed this process's own
+// just-written record could pass an availability or per-DID cap check and
+// wrongly allow a second record.
+func (p *porkbunProvisioner) invalidateZone(domain string) {
+	e := p.cache.entry(domain)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.records, e.expires = nil, time.Time{}
+}
+
 // Provision implements the provisioner interface: list the zone, refuse if
 // the label is taken or this DID already holds a handle under the domain,
 // and create the record if — and only if — both are clear.
 //
 // A single zone listing serves both checks (whether the label's record
-// exists, and how many handles this DID holds).  Zones are small — Porkbun
-// caps them at 2,500 records — and registration is rate-limited, so one
-// full list per registration is proportionate.
+// exists, and how many handles this DID holds), served from the brief
+// listing cache (see zoneRecords) so bursts of probes do not each cost
+// Porkbun a full listing.  The cache is dropped on every write this
+// process makes, so the checks below always judge records this process
+// has just created.
 //
 // For a label "john" it manages the TXT record _atproto.john.<domain>,
 // exactly the name Bluesky's handle resolver queries for john.<domain>.
 func (p *porkbunProvisioner) Provision(ctx context.Context, domain, label, did string) (provisionOutcome, error) {
 	fqdn := "_atproto." + label + "." + domain
 
-	env, err := p.call(ctx, domain, "/dns/retrieve/"+domain, map[string]string{})
+	records, err := p.zoneRecords(ctx, domain)
 	if err != nil {
 		return 0, fmt.Errorf("listing zone records: %w", err)
 	}
 
 	var labelRecords []pbRecord
 	didHandles := 0
-	for _, r := range env.Records {
+	for _, r := range records {
 		if r.Type != "TXT" || !strings.HasPrefix(r.Name, "_atproto.") {
 			continue
 		}
@@ -363,7 +487,7 @@ func (p *porkbunProvisioner) Provision(ctx context.Context, domain, label, did s
 		return outcomeDIDLimit, nil
 	}
 
-	env, err = p.call(ctx, domain, "/dns/create/"+domain, map[string]string{
+	_, err = p.call(ctx, domain, "/dns/create/"+domain, map[string]string{
 		"type":    "TXT",
 		"name":    "_atproto." + label,
 		"content": "did=" + did,
@@ -419,6 +543,11 @@ type atprotoRecord struct {
 // only caller: it needs the full population of handle records to judge
 // which are stale.  Non-_atproto records, foreign content, and
 // non-niceat-shaped names are skipped.
+//
+// This listing deliberately bypasses the zone cache (it calls Porkbun
+// directly): the reaper's judgments and marker pruning must be based on
+// complete, current zone state, never a listing that could predate a
+// recent write.
 func (p *porkbunProvisioner) listAtproto(ctx context.Context, domain string) ([]atprotoRecord, error) {
 	env, err := p.call(ctx, domain, "/dns/retrieve/"+domain, map[string]string{})
 	if err != nil {
@@ -481,6 +610,8 @@ type graceMarker struct {
 // listGraceMarkers returns every grace-marker TXT record in the zone.
 // Unparseable contents are returned as Corrupt markers rather than dropped,
 // so the reaper can prune them instead of leaving them to accumulate.
+// Like listAtproto, this bypasses the zone cache: the reaper judges on
+// fresh, complete zone state.
 func (p *porkbunProvisioner) listGraceMarkers(ctx context.Context, domain string) ([]graceMarker, error) {
 	env, err := p.call(ctx, domain, "/dns/retrieve/"+domain, map[string]string{})
 	if err != nil {

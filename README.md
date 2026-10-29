@@ -33,16 +33,20 @@ where their handle is registered.
   for custom-domain handles. Infrastructure and protocol-reserved labels
   (`www`, `_atproto`, ...) are refused, and DIDs are restricted to
   `did:plc` and `did:web` forms.
-- **Abuse is priced in.** Registration is rate limited per client IP, each
-  DID holds at most one handle per domain, repeat submissions of an
-  existing claim are idempotent, and every successful registration leaves
-  an audit log line.
+- **Abuse is priced in.** Registration is rate limited per client IP (the
+  limiter's memory is hard-capped, and proxy headers are trusted only when
+  the operator opts in), each DID holds at most one handle per domain,
+  repeat submissions of an existing claim are idempotent, and every
+  successful registration leaves an audit log line.
 - **A reaper frees abandoned handles.** A background task periodically
   sweeps each zone, resolves each record's DID to its DID document, and
   checks whether the account actually uses that handle. If the mismatch
   persists for a grace period (30 days by default, to allow for the time
   it takes to switch a username in the app), the record is deleted and
-  the label becomes available again.
+  the label becomes available again. Sweeps are time-budgeted and resolve
+  concurrently, and `did:web` fetches only go to public destinations, so
+  a hostile batch of registrations can neither stall the reaper nor
+  weaponize it.
 
 See [AGENTS.md](AGENTS.md) for the full validation rules, status codes,
 and security properties.

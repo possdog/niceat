@@ -11,6 +11,11 @@ import (
 	"strings"
 )
 
+// backendRetryAfter is the Retry-After sent with a 503: Porkbun's
+// rate-limit windows are on the order of minutes, so 30 s asks clients to
+// back off without making them give up.
+const backendRetryAfter = "30"
+
 // handleRegister handles POST /register.
 //
 // Request:  JSON body {"handle": "<label>", "did": "did:plc:..."} where
@@ -29,6 +34,8 @@ import (
 //	415 — Content-Type is not application/json
 //	421 — Host header does not match a domain this server manages
 //	429 — caller exceeded its per-IP rate limit (middleware)
+//	503 — DNS backend temporarily unavailable (e.g. its shared API key
+//	      is over Porkbun's rate limit); see the Retry-After header
 //	500 — DNS provisioning failure
 //
 // Error bodies use the shared {"detail": "..."} shape; detail strings for 4xx
@@ -102,6 +109,18 @@ func (a *app) handleRegister(w http.ResponseWriter, r *http.Request) {
 	outcome, err := a.provisioner.Provision(r.Context(), domain, label, did)
 	if err != nil {
 		log.Printf("ERROR: provisioning _atproto.%s.%s failed: %v", label, domain, err)
+		// Backend unavailability (Porkbun over the shared per-domain
+		// key's rate limit, or serving error pages) is a transient,
+		// whole-domain condition, not this request's fault.  Shed load
+		// with 503 + Retry-After so clients and proxies back off and
+		// the exhausted key gets a chance to recover; keep 500 for
+		// genuinely unexpected failures.  The body stays generic —
+		// backend detail is logged, never leaked.
+		if errors.Is(err, errBackendUnavailable) {
+			w.Header().Set("Retry-After", backendRetryAfter)
+			writeJSON(w, http.StatusServiceUnavailable, errorResponse{Detail: "Registration is temporarily unavailable; please try again shortly"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Detail: "Internal server error"})
 		return
 	}

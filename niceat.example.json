@@ -1,6 +1,7 @@
 {
   "domains": ["wagg.ing", "vore.rip"],
   "addr": ":8080",
+  "trusted_proxies": [],
   "reaper": {
     "enabled": true,
     "interval": "6h",

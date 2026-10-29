@@ -91,12 +91,25 @@ type app struct {
 	locks labelLocks
 }
 
-// labelLocks provides mutual exclusion per (domain, label) pair.  The guard
-// map itself is never shrunk: the number of concurrently contended labels is
-// tiny and bounded by real traffic, so entries are simply reused.
+// labelLockStripes is the fixed number of lock stripes in a labelLocks
+// table.  A few hundred stripes make two *live* labels colliding on one
+// stripe rare, while the table's footprint stays constant.
+const labelLockStripes = 256
+
+// labelLocks provides mutual exclusion per (domain, label) pair.  It is a
+// fixed-size striped lock table, not a per-key map: a map keyed by
+// (domain, label) never shrank — one entry was allocated per
+// validation-passing request before Provision ran, so even requests that
+// went on to fail (409, 500) grew it, and a spray of distinct labels was an
+// unbounded heap leak that could OOM the serving Machine (red-team finding
+// HIGH-2).  With stripes, memory is O(1) no matter how many distinct
+// labels pass through.  The trade: two different labels occasionally share
+// a stripe and serialize with each other — harmless extra contention, since
+// the lock is held only for the brief check-then-create.  The same
+// (domain, label) always maps to the same stripe, which is what preserves
+// the no-record-stacking guarantee described on acquire.
 type labelLocks struct {
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	stripes [labelLockStripes]sync.Mutex
 }
 
 // acquire locks the (domain, label) pair and returns the unlock func.  The
@@ -108,19 +121,24 @@ type labelLocks struct {
 // instance; multiple instances would need a shared lock (or Porkbun-side
 // conditional creates, which the API does not offer).
 func (ll *labelLocks) acquire(domain, label string) func() {
-	key := domain + "\x00" + label
-	ll.mu.Lock()
-	m := ll.locks[key]
-	if m == nil {
-		if ll.locks == nil {
-			ll.locks = make(map[string]*sync.Mutex)
-		}
-		m = &sync.Mutex{}
-		ll.locks[key] = m
-	}
-	ll.mu.Unlock()
+	m := &ll.stripes[labelStripe(domain, label)]
 	m.Lock()
 	return m.Unlock
+}
+
+// labelStripe maps a (domain, label) pair to its lock stripe via FNV-1a
+// over the NUL-joined key.  Any decent hash would do — the only property
+// acquire relies on is that the choice is a pure function of
+// (domain, label), never of timing, so the same label always lands on the
+// same stripe even as entries come and go.
+func labelStripe(domain, label string) uint32 {
+	key := domain + "\x00" + label
+	h := uint32(2166136261)
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	return h % labelLockStripes
 }
 
 // --- request / response types (JSON) ---

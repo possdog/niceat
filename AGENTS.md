@@ -42,6 +42,12 @@ directory; the file is instance-specific and gitignored:
   between sweeps; `grace` (default `720h` = 30 days) is how long a
   handle-account mismatch must persist before the record is deleted.
   Durations are Go duration strings; invalid ones fail at startup.
+- `trusted_proxies` (optional): CIDR prefixes of reverse proxies whose
+  `X-Forwarded-For` header may be trusted for client-IP attribution
+  (rate-limit buckets and the audit log).  Default empty: NO proxy is
+  trusted, not even loopback — the peer address is always the client IP.
+  Entries are validated, deduplicated, and IPv4-mapping-normalized at
+  startup; a non-CIDR entry is a startup error naming the value.
 - Unknown fields are rejected (`DisallowUnknownFields`), so a typo like
   `"domain"` fails loudly instead of silently yielding an empty domain set.
 A template with every knob at its default value lives at
@@ -95,7 +101,8 @@ Credentials for every configured domain select the real Porkbun backend;
 with no credentials at all (no env value, no file), the service falls back
 to `memoryProvisioner` (see provision.go) — same semantics, but nothing is
 published and state is lost on restart, so it must never front real
-traffic.  A configured domain missing from the document, an empty key, an
+traffic.  Startup logs this at ERROR severity, and `/healthz` then reports
+`"provisioner":"memory"` — alert on that value.  A configured domain missing from the document, an empty key, an
 entry for a domain this instance does not manage, or a document that fails
 to parse (unknown fields are rejected, as in the main config) is a startup
 error naming the domain: a domain whose records could never be published
@@ -130,17 +137,24 @@ frontend posts same-origin, so the browser's Host is the domain the user is
 browsing, and a spoofed Host can only select among domains we already
 manage.  A reverse proxy in front must therefore forward the original Host
 (or rewrite it to the correct domain); do not honor client-supplied
-`X-Forwarded-Host`.
+`X-Forwarded-Host`.  Related: Go's server would otherwise let an
+absolute-form request target (`POST http://host/register`) override the
+Host header when setting `r.Host`; since niceat is origin-only (browsers
+and the Fly edge send origin-form), absolute-form and authority-form
+targets are rejected with 400 by a middleware in `newMux`.
 
 Status codes: 201 created; 200 idempotent repeat (handle already bound to
-this DID); 400 invalid handle/DID or malformed JSON; 405 non-POST (from the
+this DID); 400 invalid handle/DID, malformed JSON, or an absolute-form
+request target (niceat is origin-only — see below); 405 non-POST (from the
 mux's `POST /register` pattern); 409 handle claimed by a different DID
 (worded identically to the reserved-name refusal, so probers learn nothing)
 or this DID already holds another handle under the served domain (one handle
 per DID per domain);
 413 body over 4 KiB; 415 Content-Type not `application/json`; 421 Host not a
 managed domain; 429 per-IP rate limit exceeded; 500 provisioning failure
-(generic detail; backend errors are logged, not leaked).
+(generic detail; backend errors are logged, not leaked); 503 the DNS
+backend is unavailable or rate-limiting (generic detail, `Retry-After`
+set — retry shortly).
 
 Validation (in `validate.go`, all error messages user-displayable).  A
 requested handle must be a valid Bluesky username **and** a valid DNS
@@ -193,16 +207,16 @@ spec (atproto.com/specs/handle), the reference implementation
 cmd/niceat/
 ├── main.go        — flags, config/credential loading, mux, graceful shutdown
 ├── config.go      — JSON config type, strict loadConfig, managedSet
-├── app.go         — app struct, labelLocks, regexes, reservedLabels, JSON types
+├── app.go         — app struct, striped label locks, regexes, reservedLabels, JSON types
 ├── handlers.go    — resolveDomain, handleRegister + writeJSON
-├── healthz.go     — GET /healthz liveness probe for deploy-time checks
+├── healthz.go     — GET /healthz liveness probe + active-provisioner report
 ├── validate.go    — parseDomain, normalizeHandle, validateDID
-├── ratelimit.go   — per-IP token bucket middleware
+├── ratelimit.go   — per-IP token bucket middleware (bounded table, trusted-proxy config)
 ├── provision.go   — provisioner interface + outcomes, memoryProvisioner
 ├── porkbun.go     — Porkbun client: zone listing, per-DID cap, create, reaper primitives
-├── resolver.go    — DID document resolution (plc.directory / did:web spec mapping)
-├── reaper.go      — background task: sweep zones, grace markers, delete unused
-├── web.go         — go:embed of the built form page + serveIndex
+├── resolver.go    — DID document resolution (plc.directory / did:web spec mapping, SSRF-guarded)
+├── reaper.go      — background task: budgeted concurrent sweeps, grace markers, delete unused
+├── web.go         — go:embed of the built form page + serveIndex (CSP/nosniff)
 ├── web/           — frontend build artifact (index.html), gitignored build product
 └── *_test.go      — tests alongside source, fakes in helpers_test.go / porkbun_test.go
 
@@ -225,14 +239,21 @@ and the DID is under the cap, with sandbox-verified semantics (an
 exact-duplicate create is 400 `DUPLICATE_RECORD` with `existingId`; a
 same-name/different-content create would stack a second TXT record and
 break the handle, hence the pre-check).  Registration is therefore two
-Porkbun calls (list + create), not one.  Tests use `fakeProvisioner`
+Porkbun calls (list + create), not one — though bursts share one listing
+per zone per 5 s via the client's cache (see Defenses).  When Porkbun
+itself is unavailable or rate-limiting (a non-JSON body, HTTP 429/5xx),
+the client returns a typed backend-unavailable error the handler maps
+to 503 with `Retry-After` — shedding load instead of 500-spamming while
+the shared key's rate-limit window resets.  Tests use `fakeProvisioner`
 (handler) and `fakePorkbunServer` (client).
 
 Because registration is a check-then-create over two Porkbun calls, the
 handler serializes it per (domain, label) with `labelLocks` (app.go): two
 concurrent requests for the same label must not both pass the "no record"
 check and stack records.  The lock is process-local, which is correct only
-while the deployment is a single instance.
+while the deployment is a single instance; its fixed 256-stripe table keeps
+memory O(1) under distinct-label spray (a never-shrinking lock map was an
+OOM vector) without weakening the same-label serialization.
 
 ## Frontend
 
@@ -244,6 +265,12 @@ the domain parameterization is **client-side** — the page reads
 `location.hostname` to show "*a Bluesky handle under wagg.ing*" (the
 equivalent on vore.rip) and posts the form same-origin, so the Host
 header carries the domain selection.  The server does no per-Host markup.
+`serveIndex` (web.go) sends a strict `Content-Security-Policy`
+(`default-src 'none'` plus inline script/style allowances — the
+single-file bundle inlines everything — and `connect-src 'self'` for
+the form POST) and `X-Content-Type-Options: nosniff`; `web_test.go`
+pins the exact value, so a new frontend subresource fails loudly until
+the policy is widened deliberately.
 
 The artifact is gitignored (see Build & run): `go build` and the tests need
 it present, so run `pnpm build` in `frontend/` before working on the Go
@@ -255,12 +282,17 @@ CSS, no SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
 ## Defenses
 
 - **DNS as the claim store** (`porkbun.go`) — availability and ownership are
-  read from the `_atproto` TXT records in a single zone listing, and the
+  read from the `_atproto` TXT records in a single zone listing (cached
+  per domain for 5 s on the HTTP path; every create/delete invalidates the
+  entry, so this process's own writes are always visible, and the reaper
+  bypasses the cache entirely), and the
   record is created only when the label is absent.  A same-DID repeat is an
   idempotent 200; a different DID is refused with 409.  A multi-record
   `_atproto` name (corrupt per the atproto spec) is treated as taken, never
   stacked onto.  The check-then-create flow runs under a per-label lock
-  (`labelLocks`) so concurrent requests cannot stack records.  No local
+  (`labelLocks`, a fixed 256-stripe lock table: O(1) memory under
+  distinct-label spray while same-label requests still serialize) so
+  concurrent requests cannot stack records.  No local
   ledger exists at all — even the reaper's grace clocks are zone records
   (see the reaper bullet below) — so nothing can desync with manual
   Porkbun dashboard edits or zone restores.
@@ -268,18 +300,22 @@ CSS, no SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   (x/time/rate): burst 5, sustained 1 per 10 s; excess requests get 429.
   It wraps only `/register` — loading the form page is a public static
   read and must not consume a visitor's registration budget.
-  Client IP comes from `RemoteAddr` normally; when the direct peer is a
-  trusted proxy (localhost only), the **rightmost** `X-Forwarded-For`
-  entry is used — a client can't mint fresh buckets by spoofing left-side
-  entries.  On Fly.io (detected via the `FLY_MACHINE_ID` env var Fly sets
+  Client IP comes from `RemoteAddr` normally; when the direct peer falls
+  inside a `trusted_proxies` CIDR prefix (opt-in via config — by default
+  NO proxy is trusted, not even loopback), the **rightmost**
+  `X-Forwarded-For` entry is used — a client can't mint fresh buckets by
+  spoofing left-side entries.  On Fly.io (detected via the `FLY_MACHINE_ID` env var Fly sets
   on every Machine), the peer is Fly's edge proxy and `Fly-Client-IP` —
   which Fly's edge overwrites, so clients cannot forge it there — is used
   instead; the env gate exists because outside Fly nothing strips that
   header, so honoring it unconditionally would let anyone mint fresh
   buckets.  A present-but-invalid `Fly-Client-IP` falls back to the peer
-  address.  `X-Real-IP` is never trusted.  Idle IPs are evicted after an
-  hour (sweep above a 10 000-entry threshold) to bound memory under
-  IP-spray abuse.
+  address.  `X-Real-IP` is never trusted.  IP keys are canonicalized (an
+  IPv4-mapped spelling and its plain form share one bucket), and the table
+  is hard-capped at 10 000 entries: past the cap, idle entries go first,
+  then the least-recently-used quarter in one batch — so a sustained
+  IP-spray can never grow memory without bound (and 429'd sprayers do
+  not get their entries kept fresh forever).
 - **Per-DID handle cap** (`porkbun.go`, `provision.go`) — one handle per DID
   per domain: the same zone listing that checks label availability also
   counts the DID's existing `_atproto` records in that zone; a second label
@@ -306,11 +342,27 @@ CSS, no SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   each record's
   DID (plc.directory for `did:plc`, the DID's own domain per the did:web
   spec for `did:web` — root form at `/.well-known/did.json`, path-segment
-  forms at `<path>/did.json` with a percent-encoded port decoded), and
-  checks the DID document's `alsoKnownAs` for
+  forms at `<path>/did.json` with a percent-encoded port decoded) through
+  a bounded pool of 6 workers with a 5 s per-fetch timeout, under a
+  4-minute per-zone resolution budget: records the budget does not reach
+  are deferred to the next sweep with an operator-visible log line (a
+  process-local resume cursor carries the position — judgment is
+  idempotent, so a lost cursor only re-judges), and identical DIDs are
+  resolved once per sweep with the verdict shared across their records.
+  `did:web` fetches refuse loopback/private/link-local/unique-local
+  destinations at dial time (which also defeats DNS rebinding) and
+  follow no redirects — such records are unverifiable, never reaped.  The
+  reaper checks the DID document's `alsoKnownAs` for
   `at://<handle>` — the list of handles the account actually uses.  Only
-  AFFIRMATIVE evidence counts: a directory 404 means the account is gone;
-  a network error or an unverifiable DID means skip and retry next pass.
+  AFFIRMATIVE evidence counts: a directory 404 means the account is gone,
+  and for `did:web` a host that no longer exists in DNS (NXDOMAIN) is the
+  same class of evidence — the host IS the identifier per the did:web
+  spec; a network error, DNS SERVFAIL, a 5xx, a wrong-`id` document, or
+  an unverifiable DID means skip and retry next pass.  When plc.directory
+  answers 429, the sweep stops directory fetches for the rest of the pass
+  (Retry-After honored, 60 s default) and defers the remaining
+  `did:plc` records — a third-party rate limit can never masquerade as
+  affirmative evidence.
   A mismatch must persist for the whole grace period (default 30 days,
   the chicken-and-egg allowance for setting the username in-app after the
   record exists) before the record is deleted — every reap logs an
@@ -349,13 +401,17 @@ CSS, no SvelteKit/SSR), see frontend/AGENTS.md.  In dev, `pnpm dev` proxies
   zones that have stopped generating it.  The reaper therefore runs on a
   second, service-less Machine: the Fly proxy manages no such Machine,
   so its lifetime is exactly the process's lifetime — `niceat
-  -reap-once` sweeps once (under a hard 10-minute wall-clock deadline
-  backstop; every network call already has its own timeout) and exits,
+  -reap-once` sweeps once (the per-zone resolution budget normally
+  finishes well inside the hard 10-minute wall-clock deadline backstop,
+  deferring rather than aborting; every fetch has its own timeout) and
+  exits,
   which is what puts the Machine back to sleep.  A crash just stops the
   Machine until the next schedule — no crash loop, retry next day.  The
   reaper is stateless (its grace clocks live in the DNS zones as marker
   records), so neither the scheduled stop/start cycle nor a Machine
-  recreation on deploy touches any clock.  Both Machines share the same
+  recreation on deploy touches any clock.  (The sweep's resume cursor
+  is process-local and purely a scheduling hint; losing it just
+  re-judges idempotently.)  Both Machines share the same
   secrets; the same config serves both (`-reap-once` ignores
   `reaper.enabled`).  Routine deploys
   — secrets sync, serving Machine, and a reaper Machine recreated on

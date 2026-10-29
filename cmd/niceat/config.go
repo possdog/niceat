@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"time"
 )
@@ -35,11 +36,24 @@ type config struct {
 	// Reaper configures the background handle reaper.  Optional; every
 	// field defaults sensibly (see reaperSettings).
 	Reaper *reaperSettings `json:"reaper,omitempty"`
+	// TrustedProxies lists CIDR prefixes (e.g. "127.0.0.1/32", "::1/128",
+	// or a corporate proxy range) of reverse proxies whose
+	// X-Forwarded-For may be trusted to identify the real client for
+	// rate-limit bucketing and the audit log.  Optional; the default
+	// (absent or empty) trusts no proxy at all — the peer address is
+	// always the client IP — because "the peer is loopback" style
+	// implicit trust handed every client behind a local proxy unlimited
+	// rate-limit buckets and forged audit IPs (red-team finding LOW-6).
+	// Entries must be CIDR prefixes; anything else fails at startup.
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
 
 	// Resolved reaper settings (filled in by loadConfig, not on disk).
 	reaperEnabled  bool
 	reaperInterval time.Duration
 	reaperGrace    time.Duration
+	// trustedProxies is TrustedProxies parsed into prefixes, masked to
+	// their network boundary and de-duplicated (filled in by loadConfig).
+	trustedProxies []netip.Prefix
 }
 
 // reaperSettings is the "reaper" section of the config file, e.g.:
@@ -124,7 +138,33 @@ func loadConfig(path string) (*config, error) {
 			cfg.reaperGrace = d
 		}
 	}
+
+	// Resolve the trusted-proxy prefixes so the rate limiter never
+	// re-parses.  Masked to their network boundary so spelling variants
+	// of the same network collapse into one entry, exactly as domain
+	// normalization de-duplicates "WAGG.ING." and "wagg.ing".
+	cfg.trustedProxies = nil
+	for _, raw := range cfg.TrustedProxies {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: invalid trusted_proxies entry %q: must be a CIDR prefix like \"127.0.0.1/32\"", path, raw)
+		}
+		p = p.Masked()
+		if !containsPrefix(cfg.trustedProxies, p) {
+			cfg.trustedProxies = append(cfg.trustedProxies, p)
+		}
+	}
 	return &cfg, nil
+}
+
+// containsPrefix reports whether ps holds the given prefix.
+func containsPrefix(ps []netip.Prefix, p netip.Prefix) bool {
+	for _, q := range ps {
+		if q == p {
+			return true
+		}
+	}
+	return false
 }
 
 // managedSet returns the config's normalized domains as the lookup set the

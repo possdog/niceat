@@ -25,6 +25,30 @@ func TestServeIndexPage(t *testing.T) {
 	}
 }
 
+// TestServeIndexHardeningHeaders pins the security headers of the served
+// page (audit INFO-8).  The CSP is asserted exactly so that a future
+// frontend change that adds a subresource (a font, an image, an external
+// script) fails loudly here until the policy is widened on purpose —
+// every directive is derived from the current single-file page's needs
+// (see the comment in web.go).
+func TestServeIndexHardeningHeaders(t *testing.T) {
+	const wantCSP = "default-src 'none'; base-uri 'none'; form-action 'self'; " +
+		"frame-ancestors 'none'; object-src 'none'; " +
+		"script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'"
+
+	a := newTestApp(t, &fakeProvisioner{})
+	w := doRegisterMux(t, a, http.MethodGet, "/", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if csp := w.Header().Get("Content-Security-Policy"); csp != wantCSP {
+		t.Errorf("Content-Security-Policy = %q, want %q", csp, wantCSP)
+	}
+	if xcto := w.Header().Get("X-Content-Type-Options"); xcto != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want %q", xcto, "nosniff")
+	}
+}
+
 // TestServeIndexMethodRouting: the page is registered as GET-only, so other
 // methods get the mux's 405, and paths other than exactly "/" get a 404 —
 // the server deliberately exposes nothing else.
@@ -57,6 +81,73 @@ func TestServeIndexUnmanagedHost(t *testing.T) {
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("GET / unmanaged host status = %d, want %d", w.Code, http.StatusMisdirectedRequest)
+	}
+	if got := decodeDetail(t, w); got == "" {
+		t.Fatal("expected non-empty error detail")
+	}
+}
+
+// TestRegisterAbsoluteFormRejected reproduces the audit's INFO-9 probe:
+// "POST http://<managed-domain>/register HTTP/1.1" alongside a mismatched
+// Host header.  Go's server derives r.Host from an absolute-form target and
+// ignores the Host header entirely (net/http ReadRequest: "any Host line is
+// ignored"), so before the rejectAbsoluteForm middleware this request was
+// attributed to the target's host and returned 201.  It must now be refused
+// outright — before domain resolution, so it must never reach the
+// provisioner.
+func TestRegisterAbsoluteFormRejected(t *testing.T) {
+	fp := &fakeProvisioner{outcome: outcomeCreated}
+	a := newTestApp(t, fp)
+	w := doRegisterMux(t, a, http.MethodPost, "http://"+testDomain+"/register",
+		`{"handle":"john","did":"`+validPLC+`"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("absolute-form POST /register status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if got := decodeDetail(t, w); got == "" {
+		t.Fatal("expected non-empty error detail")
+	}
+	if len(fp.calls) != 0 {
+		t.Errorf("absolute-form request reached the provisioner: %+v", fp.calls)
+	}
+}
+
+// TestServeIndexAbsoluteFormRejected: the form page route rejects
+// absolute-form targets with the same 400, so no route disagrees with
+// /register about request-target form.
+func TestServeIndexAbsoluteFormRejected(t *testing.T) {
+	a := newTestApp(t, &fakeProvisioner{})
+	w := doRegisterMux(t, a, http.MethodGet, "https://"+testDomain+"/", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("absolute-form GET / status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if got := decodeDetail(t, w); got == "" {
+		t.Fatal("expected non-empty error detail")
+	}
+}
+
+// TestRegisterOriginFormHostGating pins that rejecting absolute-form
+// targets changed nothing about ordinary origin-form requests: domain
+// selection still comes from the Host header alone — a managed Host
+// registers (201), an unmanaged Host still gets 421.
+func TestRegisterOriginFormHostGating(t *testing.T) {
+	a := newTestApp(t, &fakeProvisioner{outcome: outcomeCreated})
+	mux := a.newMux(newRateLimiter())
+
+	// Managed host: a plain origin-form POST still registers.
+	body := `{"handle":"john","did":"` + validPLC + `"}`
+	w := doMux(t, mux, http.MethodPost, "/register", body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("origin-form POST /register managed host status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	// Unmanaged host: same request is still refused with 421.
+	req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+	req.Host = "unmanaged.example.com"
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("origin-form POST /register unmanaged host status = %d, want %d", w.Code, http.StatusMisdirectedRequest)
 	}
 	if got := decodeDetail(t, w); got == "" {
 		t.Fatal("expected non-empty error detail")

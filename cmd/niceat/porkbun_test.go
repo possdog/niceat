@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +42,12 @@ type fakePorkbunServer struct {
 	// Porkbun-style ERROR with the given code instead of its usual reply.
 	failRetrieveCode string
 	failCreateCode   string
+	// rawRetrieveStatus / rawRetrieveBody, when status is non-zero, make
+	// the zone listing answer with this raw status and body instead of
+	// the JSON envelope — Porkbun's observed behavior when the API key
+	// is over its rate limit (an HTML error page).
+	rawRetrieveStatus int
+	rawRetrieveBody   string
 	// lastCreate is the decoded body of the most recent create call.
 	lastCreate map[string]string
 
@@ -75,6 +82,12 @@ func (f *fakePorkbunServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasPrefix(r.URL.Path, "/dns/retrieve/"):
 		f.retrieves++
+		if f.rawRetrieveStatus != 0 {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(f.rawRetrieveStatus)
+			_, _ = w.Write([]byte(f.rawRetrieveBody))
+			return
+		}
 		if f.failRetrieveCode != "" {
 			writeError(f.failRetrieveCode)
 			return
@@ -358,6 +371,145 @@ func TestPorkbunProvisionTransportError(t *testing.T) {
 
 	if outcome, err := p.Provision(context.Background(), testDomain, "john", validPLC); err == nil {
 		t.Fatalf("expected a transport error, got outcome %d", outcome)
+	}
+}
+
+func TestPorkbunBackendUnavailable(t *testing.T) {
+	// Porkbun signals an exhausted or unavailable API either with a
+	// non-JSON HTML error page (observed live when the shared per-domain
+	// key is over its rate limit) or with an HTTP 429/5xx status.  Every
+	// shape must classify as errBackendUnavailable so the handler can
+	// shed load with 503 instead of masking a whole-domain outage as a
+	// per-request 500.
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"HTML error page with 200", http.StatusOK, "<html><body>Too many requests</body></html>"},
+		{"HTTP 429 with HTML body", http.StatusTooManyRequests, "<html>slow down</html>"},
+		{"HTTP 429 with JSON body", http.StatusTooManyRequests, `{"status":"ERROR","code":"RATE_LIMITED"}`},
+		{"HTTP 500", http.StatusInternalServerError, "internal error"},
+		{"HTTP 502 with JSON envelope", http.StatusBadGateway, `{"status":"ERROR","code":"UPSTREAM"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakePorkbun()
+			f.rawRetrieveStatus = tt.status
+			f.rawRetrieveBody = tt.body
+			p := newTestPorkbun(t, f)
+
+			outcome, err := p.Provision(context.Background(), testDomain, "john", validPLC)
+			if err == nil {
+				t.Fatalf("expected an error, got outcome %d", outcome)
+			}
+			if !errors.Is(err, errBackendUnavailable) {
+				t.Fatalf("expected errBackendUnavailable, got: %v", err)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.creates != 0 {
+				t.Fatalf("no create expected when the backend is unavailable, got %d", f.creates)
+			}
+		})
+	}
+}
+
+func TestPorkbunListingCacheServesRepeatLookups(t *testing.T) {
+	// Within the TTL, repeat availability and per-DID cap probes must be
+	// served from the cached listing instead of each costing Porkbun a
+	// full zone listing — the shared per-domain key is the resource an
+	// aggregate burst exhausts.
+	f := newFakePorkbun()
+	f.records[fqdn(testDomain, "taken")] = []string{"did=" + otherDID()}
+	f.records[fqdn(testDomain, "mary")] = []string{"did=" + validPLC}
+	p := newTestPorkbun(t, f)
+
+	// One availability probe (label taken by another DID) and two
+	// per-DID cap probes (this DID already holds "mary"): none writes,
+	// so none invalidates.
+	if outcome, err := p.Provision(context.Background(), testDomain, "taken", validPLC); err != nil || outcome != outcomeConflict {
+		t.Fatalf("taken-label probe: outcome %d, err %v", outcome, err)
+	}
+	if outcome, err := p.Provision(context.Background(), testDomain, "aaa", validPLC); err != nil || outcome != outcomeDIDLimit {
+		t.Fatalf("cap probe aaa: outcome %d, err %v", outcome, err)
+	}
+	if outcome, err := p.Provision(context.Background(), testDomain, "bbb", validPLC); err != nil || outcome != outcomeDIDLimit {
+		t.Fatalf("cap probe bbb: outcome %d, err %v", outcome, err)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retrieves != 1 || f.creates != 0 {
+		t.Fatalf("expected the three probes to share 1 listing with 0 creates, got %d listings, %d creates", f.retrieves, f.creates)
+	}
+}
+
+func TestPorkbunListingCacheInvalidatedByOwnWrites(t *testing.T) {
+	// A write this process makes must be visible to the very next
+	// lookup: a listing cached before the create must never judge a
+	// request that arrives after it, or a same-label different-DID
+	// create would stack a second record and a second label for the
+	// same DID would slip past the cap.
+	f := newFakePorkbun()
+	p := newTestPorkbun(t, f)
+	ctx := context.Background()
+
+	if outcome, err := p.Provision(ctx, testDomain, "john", validPLC); err != nil || outcome != outcomeCreated {
+		t.Fatalf("fresh registration: outcome %d, err %v", outcome, err)
+	}
+	// The create dropped the cached listing, so this probe re-lists the
+	// zone and sees the fresh record.
+	if outcome, err := p.Provision(ctx, testDomain, "john", otherDID()); err != nil || outcome != outcomeConflict {
+		t.Fatalf("same label, different DID must conflict: outcome %d, err %v", outcome, err)
+	}
+	// And the DID that just registered holds its one-handle cap: a
+	// second label must be judged against the post-create zone.
+	if outcome, err := p.Provision(ctx, testDomain, "mary", validPLC); err != nil || outcome != outcomeDIDLimit {
+		t.Fatalf("second label, same DID must hit the cap: outcome %d, err %v", outcome, err)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.creates != 1 {
+		t.Fatalf("only the first registration may create, got %d creates", f.creates)
+	}
+	if got := f.records[fqdn(testDomain, "john")]; len(got) != 1 || got[0] != "did="+validPLC {
+		t.Fatalf("the label's record must not be stacked, contents: %v", got)
+	}
+}
+
+func TestPorkbunReaperBypassesListingCache(t *testing.T) {
+	// The reaper judges records and prunes markers on complete, current
+	// zone state: its listings must always fetch fresh truth, even when
+	// a fresh cached listing is available.
+	f := newFakePorkbun()
+	p := newTestPorkbun(t, f)
+	ctx := context.Background()
+
+	if _, err := p.Provision(ctx, testDomain, "john", validPLC); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	// Prime the cache with a post-create listing of the zone (the
+	// idempotent repeat reads but does not write).
+	if outcome, err := p.Provision(ctx, testDomain, "john", validPLC); err != nil || outcome != outcomeRegistered {
+		t.Fatalf("idempotent repeat: outcome %d, err %v", outcome, err)
+	}
+	f.mu.Lock()
+	retrievesBefore := f.retrieves
+	f.mu.Unlock()
+
+	records, err := p.listAtproto(ctx, testDomain)
+	if err != nil {
+		t.Fatalf("listAtproto: %v", err)
+	}
+	if len(records) != 1 || records[0].Label != "john" {
+		t.Fatalf("reaper must see the created record, got %v", records)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retrieves != retrievesBefore+1 {
+		t.Fatalf("reaper listing must fetch fresh (bypass the cache): %d -> %d", retrievesBefore, f.retrieves)
 	}
 }
 

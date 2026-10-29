@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"os"
 	"strings"
 	"testing"
 )
@@ -282,6 +287,62 @@ func TestHandleRegisterDIDLimit(t *testing.T) {
 	}
 }
 
+func TestHandleRegisterBackendUnavailable(t *testing.T) {
+	// A backend-unavailable error (the shared per-domain Porkbun key over
+	// its rate limit) is a transient, whole-domain condition: the handler
+	// must shed load with 503 + Retry-After and a generic body, not
+	// answer 500 as if each request had individually failed.
+	p := &fakeProvisioner{err: fmt.Errorf("listing zone records: %w", errBackendUnavailable)}
+	a := newTestApp(t, p)
+	w := doRegister(t, a, registerBody(t, "john", validPLC), "")
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+	if ra := w.Header().Get("Retry-After"); ra != backendRetryAfter {
+		t.Fatalf("expected Retry-After %s, got %q", backendRetryAfter, ra)
+	}
+	if d := decodeDetail(t, w); strings.Contains(strings.ToLower(d), "porkbun") {
+		t.Fatalf("backend detail leaked to client: %q", d)
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("expected 1 provisioner call, got %d", len(p.calls))
+	}
+}
+
+func TestHandleRegisterPorkbunUnavailable(t *testing.T) {
+	// End to end through the real Porkbun client: the fake serves the
+	// shapes Porkbun produces when the shared key is exhausted, and the
+	// handler must answer 503 with Retry-After and a generic body.
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"HTML error page", http.StatusOK, "<html>too many requests</html>"},
+		{"HTTP 429", http.StatusTooManyRequests, "slow down"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakePorkbun()
+			f.rawRetrieveStatus = tt.status
+			f.rawRetrieveBody = tt.body
+			a := newTestApp(t, newTestPorkbun(t, f))
+			w := doRegister(t, a, registerBody(t, "john", validPLC), "")
+
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+			}
+			if ra := w.Header().Get("Retry-After"); ra != backendRetryAfter {
+				t.Fatalf("expected Retry-After %s, got %q", backendRetryAfter, ra)
+			}
+			if d := decodeDetail(t, w); strings.Contains(strings.ToLower(d), "porkbun") {
+				t.Fatalf("backend detail leaked to client: %q", d)
+			}
+		})
+	}
+}
+
 func TestHandleRegisterProvisionerErrorIsRetryable(t *testing.T) {
 	// A failed registration must leave nothing behind (DNS-as-truth has no
 	// separate claim to roll back): swapping in a working provisioner and
@@ -428,6 +489,56 @@ func TestHandleRegisterComposedLengthPerDomain(t *testing.T) {
 	if len(exampleP.calls) != 0 {
 		t.Fatalf("provisioner must not be called when the composed handle is over budget, got %+v", exampleP.calls)
 	}
+}
+
+// TestHandleRegisterAuditClientIP verifies the AUDIT log line's client IP
+// comes from the same policy-derived clientIP the rate limiter buckets on:
+// with no trusted proxies configured (the default), a spoofed
+// X-Forwarded-For must not forge the only abuse record the system keeps;
+// with the proxy's prefix configured, the rightmost entry is attributed.
+func TestHandleRegisterAuditClientIP(t *testing.T) {
+	orig := trustedProxies
+	defer func() { trustedProxies = orig }()
+
+	auditRegister := func(t *testing.T, a *app, remoteAddr, forwardedFor string) string {
+		t.Helper()
+		var buf bytes.Buffer
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(registerBody(t, "john", validPLC)))
+		req.Host = testDomain
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = remoteAddr
+		if forwardedFor != "" {
+			req.Header.Set("X-Forwarded-For", forwardedFor)
+		}
+		w := httptest.NewRecorder()
+		a.handleRegister(w, req)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+		}
+		return buf.String()
+	}
+
+	t.Run("default: spoofed XFF does not forge the audit IP", func(t *testing.T) {
+		trustedProxies = nil
+		out := auditRegister(t, newTestApp(t, &fakeProvisioner{}), "127.0.0.1:8080", "198.18.9.3")
+		if !strings.Contains(out, "(client 127.0.0.1)") {
+			t.Fatalf("audit line does not attribute the peer address: %q", out)
+		}
+		if strings.Contains(out, "198.18.9.3") {
+			t.Fatalf("spoofed XFF value forged the audit IP: %q", out)
+		}
+	})
+
+	t.Run("configured prefix: rightmost XFF attributed", func(t *testing.T) {
+		trustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+		out := auditRegister(t, newTestApp(t, &fakeProvisioner{}), "127.0.0.1:8080", "spoofed, 198.18.9.3")
+		if !strings.Contains(out, "(client 198.18.9.3)") {
+			t.Fatalf("audit line does not attribute the trusted proxy's rightmost XFF entry: %q", out)
+		}
+	})
 }
 
 func TestRegisterRouting(t *testing.T) {

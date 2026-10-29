@@ -52,6 +52,18 @@ func main() {
 		cfg.Addr = *addrOverride
 	}
 
+	// X-Forwarded-For trust is per-deployment opt-in (config
+	// "trusted_proxies"); with no prefixes configured, no proxy is
+	// trusted and the TCP peer address is always the client IP.
+	if len(cfg.trustedProxies) > 0 {
+		prefixes := make([]string, 0, len(cfg.trustedProxies))
+		for _, p := range cfg.trustedProxies {
+			prefixes = append(prefixes, p.String())
+		}
+		log.Printf("trusted proxy prefixes: %s", strings.Join(prefixes, ", "))
+	}
+	trustedProxies = cfg.trustedProxies
+
 	// Per-domain Porkbun credentials (porkbun_keys.json in the working
 	// directory, gitignored, or the PORKBUN_CREDENTIALS environment
 	// variable) select the real DNS backend.  Without them, the in-memory
@@ -65,7 +77,12 @@ func main() {
 	if haveCreds {
 		backend = newPorkbunProvisioner(creds, "")
 	} else {
-		log.Println("WARNING: no Porkbun credentials found — running the in-memory provisioner; registrations are accepted but no DNS records are created")
+		// ERROR, not WARNING: this is the one misconfiguration that turns
+		// the service into a silent fake-success (registrations answer
+		// 201/200 while nothing is published), so the line must trip
+		// log-based alerting.  /healthz reports the same condition as
+		// "provisioner":"memory" for machine detection.
+		log.Println("ERROR: no Porkbun credentials found — running the in-memory provisioner; registrations are accepted but NOT published and are lost on restart; this instance must not serve real traffic")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -146,17 +163,66 @@ func main() {
 // exercise routing through it, so their behavior cannot drift apart.
 func (a *app) newMux(rl *rateLimiter) *http.ServeMux {
 	mux := http.NewServeMux()
+	// Every route is wrapped in rejectAbsoluteForm: Go's server sets
+	// r.Host from an absolute-form request target, silently overriding
+	// the Host header (audit INFO-9), so a "POST http://<managed>/register"
+	// wire request was attributed to the target's host no matter what
+	// the Host header said.  niceat is an origin server — its clients
+	// (browsers, the Fly edge proxy) send origin-form targets — so
+	// absolute-form requests are rejected outright rather than risk
+	// disagreeing with any front proxy that routes by the Host header.
 	// Method-specific pattern: non-POST requests to /register get a 405
 	// from the mux without any handler code.  The per-IP rate limiter
 	// wraps only this route — the form page is a public static read and
 	// must not consume a visitor's registration budget.
-	mux.Handle("POST /register", rl.middleware(http.HandlerFunc(a.handleRegister)))
+	mux.Handle("POST /register", rejectAbsoluteForm(rl.middleware(http.HandlerFunc(a.handleRegister))))
 	// {$} matches only "/" exactly; every other path falls through to the
 	// mux's plain 404.
-	mux.HandleFunc("GET /{$}", a.serveIndex)
+	mux.Handle("GET /{$}", rejectAbsoluteForm(http.HandlerFunc(a.serveIndex)))
 	// Liveness probe for deploy-time health checks (Fly [http_service.checks]).
 	// Not rate-limited, like the form page: health probes are
 	// infrastructure traffic, not visitor registrations.
-	mux.Handle("GET /healthz", http.HandlerFunc(a.handleHealthz))
+	mux.Handle("GET /healthz", rejectAbsoluteForm(http.HandlerFunc(a.handleHealthz)))
 	return mux
+}
+
+// rejectAbsoluteForm answers 400 to any request whose request-target on the
+// wire was not origin-form ("/path"): absolute-form ("scheme://host/path")
+// because Go's server lets it override the Host header (see newMux), and
+// authority-form ("host:port", CONNECT-only) because it has no meaning at
+// an origin server either.  Origin-form requests pass through byte-for-byte
+// unchanged in behavior.
+func rejectAbsoluteForm(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if absoluteFormTarget(r.RequestURI) {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Detail: "Invalid request target"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// absoluteFormTarget reports whether target — the request-target exactly as
+// it appeared on the wire (r.RequestURI, which the mux otherwise ignores) —
+// starts with a scheme.  Per RFC 3986 a scheme starts with a letter and
+// continues with letters, digits, "+", "-", or "." up to the first ":".
+// Origin-form ("/path") and asterisk-form ("*") targets start with a
+// non-letter and can never match.
+func absoluteFormTarget(target string) bool {
+	if target == "" || !isASCIILetter(target[0]) {
+		return false
+	}
+	i := 1
+	for i < len(target) && isSchemeByte(target[i]) {
+		i++
+	}
+	return i < len(target) && target[i] == ':'
+}
+
+func isASCIILetter(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+func isSchemeByte(c byte) bool {
+	return isASCIILetter(c) || c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'
 }

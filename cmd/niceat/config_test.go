@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,6 +122,86 @@ func TestLoadConfig(t *testing.T) {
 			}
 			if cfg.Addr != tt.wantAddr {
 				t.Fatalf("addr = %q, want %q", cfg.Addr, tt.wantAddr)
+			}
+		})
+	}
+}
+
+func TestLoadConfigTrustedProxies(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []netip.Prefix // nil => no trust, the safe default
+		wantErr string
+	}{
+		{
+			// Absent means no trust: the peer address is always the
+			// client IP (LOW-6).
+			name:    "absent: no proxy trusted",
+			content: `{"domains": ["wagg.ing"]}`,
+			want:    nil,
+		},
+		{
+			name:    "empty array: no proxy trusted",
+			content: `{"domains": ["wagg.ing"], "trusted_proxies": []}`,
+			want:    nil,
+		},
+		{
+			name:    "single loopback prefix",
+			content: `{"domains": ["wagg.ing"], "trusted_proxies": ["127.0.0.1/32"]}`,
+			want:    []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
+		},
+		{
+			name:    "ipv6 prefix",
+			content: `{"domains": ["wagg.ing"], "trusted_proxies": ["::1/128"]}`,
+			want:    []netip.Prefix{netip.MustParsePrefix("::1/128")},
+		},
+		{
+			// Host bits are masked away, so spellings of the same
+			// network collapse into one prefix — mirroring how
+			// domains are normalized and de-duplicated.
+			name:    "masked spellings of one network deduplicate",
+			content: `{"domains": ["wagg.ing"], "trusted_proxies": ["10.0.0.5/24", "10.0.0.0/24", "10.0.0.9/24"]}`,
+			want:    []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		},
+		{
+			// A name is not a prefix: trust must be expressed as
+			// CIDR so an operator states exactly which addresses
+			// may identify the client.
+			name:    "non-CIDR entry is a startup error",
+			content: `{"domains": ["wagg.ing"], "trusted_proxies": ["localhost"]}`,
+			wantErr: `invalid trusted_proxies entry "localhost"`,
+		},
+		{
+			name:    "bare IP is not a CIDR prefix",
+			content: `{"domains": ["wagg.ing"], "trusted_proxies": ["127.0.0.1"]}`,
+			wantErr: `invalid trusted_proxies entry "127.0.0.1"`,
+		},
+		{
+			name:    "invalid mask bits",
+			content: `{"domains": ["wagg.ing"], "trusted_proxies": ["10.0.0.0/99"]}`,
+			wantErr: `invalid trusted_proxies entry "10.0.0.0/99"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := loadConfig(writeConfig(t, tt.content))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+			if len(cfg.trustedProxies) != len(tt.want) {
+				t.Fatalf("trustedProxies = %v, want %v", cfg.trustedProxies, tt.want)
+			}
+			for i := range tt.want {
+				if cfg.trustedProxies[i] != tt.want[i] {
+					t.Fatalf("trustedProxies[%d] = %v, want %v", i, cfg.trustedProxies[i], tt.want[i])
+				}
 			}
 		})
 	}
